@@ -1,8 +1,19 @@
 [package]
 name = "piki-multiplex"
-version.workspace = true
+version = "0.1.0"
 edition = "2024"
+license = "GPL-2.0"
+repository = "https://github.com/juanknebel/piki-multiplex"
 description = "Terminal multiplexer engine: PTY spawning, vt100 terminal state, OSC 133/7 shell integration, and a headless persistent-session daemon with Unix-socket reattach."
+
+# `vt100` is patched (scrollback-from-scroll-region, Screen::restore_formatted())
+# for terminal-session persistence — see https://github.com/juanknebel/piki-vt100.
+# This patch only applies when this crate's own Cargo.toml is the workspace
+# root (i.e. building/testing this repo standalone). A consumer embedding this
+# crate in its own workspace (e.g. agent-multi) must apply the same patch in
+# its own root Cargo.toml instead — Cargo patches don't propagate downstream.
+[patch.crates-io]
+vt100 = { git = "https://github.com/juanknebel/piki-vt100", branch = "main" }
 
 [dependencies]
 # Async runtime
