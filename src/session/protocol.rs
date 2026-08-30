@@ -27,7 +27,6 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::cli_agent::CliAgentStatus;
 use crate::shell_integration::ShellEvent;
 
 /// Bump on any incompatible change. The daemon refuses nothing itself — the
@@ -87,7 +86,7 @@ pub enum Request {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Reply {
     Pong,
@@ -262,7 +261,7 @@ pub struct SessionInfo {
 /// Wire form of [`crate::shell_integration::ShellTabState`]: what a client
 /// needs to rebuild its per-tab status the moment it attaches. `Instant`s
 /// become relative durations.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ShellStateSnapshot {
     #[serde(default)]
     pub cwd: Option<PathBuf>,
@@ -274,8 +273,13 @@ pub struct ShellStateSnapshot {
     /// How long the in-flight command has been running, if any.
     #[serde(default)]
     pub in_flight_for_ms: Option<u64>,
+    /// Opaque snapshot of the tab's [`SidecarState`](crate::shell_integration::SidecarState),
+    /// if a [`SidecarConfig`](crate::shell_integration::SidecarConfig) was
+    /// supplied at spawn time and at least one event has arrived. The daemon
+    /// never interprets this — it's whatever the caller-supplied
+    /// `SidecarState::snapshot()` produced, forwarded verbatim.
     #[serde(default)]
-    pub cli_agent: Option<CliAgentSnapshot>,
+    pub sidecar: Option<serde_json::Value>,
     #[serde(default)]
     pub window_title: Option<String>,
 }
@@ -291,28 +295,12 @@ pub struct CommandSnapshot {
     pub finished_ago_ms: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct CliAgentSnapshot {
-    #[serde(default)]
-    pub session_id: Option<String>,
-    #[serde(default)]
-    pub status: CliAgentStatus,
-    #[serde(default)]
-    pub last_summary: Option<String>,
-    #[serde(default)]
-    pub attention_pending: bool,
-    /// How long the current run has been going, if one is in flight
-    /// (`CliAgentState::run_started_at`).
-    #[serde(default)]
-    pub run_for_ms: Option<u64>,
-}
-
 // ── Frames ───────────────────────────────────────────────────────────────
 
 /// Every message that can cross the socket, in either direction. Which
 /// frames are meaningful when is defined by the connection lifecycle in the
 /// module docs; a peer ignores frames it does not expect.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Frame {
     Hello(Hello),
     Request(Request),
@@ -569,7 +557,6 @@ pub fn is_disconnect(err: &io::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli_agent::CliAgentEvent;
     use std::io::Cursor;
 
     fn round_trip(frame: Frame) {
@@ -646,13 +633,13 @@ mod tests {
                 }),
                 attention_pending: true,
                 in_flight_for_ms: None,
-                cli_agent: Some(CliAgentSnapshot {
-                    session_id: Some("s1".into()),
-                    status: CliAgentStatus::WaitingPermission,
-                    last_summary: Some("Wants to run Bash".into()),
-                    attention_pending: true,
-                    run_for_ms: Some(1500),
-                }),
+                sidecar: Some(serde_json::json!({
+                    "session_id": "s1",
+                    "status": "waiting-permission",
+                    "last_summary": "Wants to run Bash",
+                    "attention_pending": true,
+                    "run_for_ms": 1500,
+                })),
                 window_title: Some("codex".into()),
             },
         }));
@@ -678,12 +665,12 @@ mod tests {
             replayed: true,
         });
         round_trip(Frame::ShellEvent {
-            event: ShellEvent::CliAgent(CliAgentEvent::Stop {
-                session_id: "s".into(),
-                query: None,
-                response: Some("done".into()),
-                transcript_path: Some(PathBuf::from("/t.jsonl")),
-            }),
+            event: ShellEvent::Sidecar(serde_json::json!({
+                "event": "stop",
+                "session_id": "s",
+                "response": "done",
+                "transcript_path": "/t.jsonl",
+            })),
             replayed: false,
         });
         round_trip(Frame::ShellEvent {

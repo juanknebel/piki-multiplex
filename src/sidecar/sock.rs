@@ -1,16 +1,13 @@
-//! Out-of-band per-tab FIFO transport for the structured cli-agent channel.
+//! Out-of-band per-tab FIFO transport for a caller-defined sidecar event
+//! stream.
 //!
-//! Claude Code spawns its hook subprocesses `setsid`-detached with **no
-//! controlling terminal**, so the hook's in-band `printf … > /dev/tty` OSC 777
-//! write (see [`super::install`] / `build-payload.sh`) never reaches piki's
-//! PTY stream. Env vars on the `claude` child *do* propagate to its hooks, so
-//! we advertise a per-spawn FIFO path via `PIKI_CLI_AGENT_SOCK`; the hook
-//! writes newline-delimited JSON there and this reader feeds it into the same
-//! [`ShellSession`] the OSC parser feeds — a purely additive second producer.
-//!
-//! The OSC 777 path stays as a compat/graceful-degradation fallback (the hook
-//! uses it only when the FIFO env var is absent); nothing on the consumer side
-//! changes.
+//! A structured-agent hook (or any other out-of-band emitter) may run
+//! detached from any controlling terminal, so an in-band OSC 777 write can
+//! never reach the PTY stream it's nominally attached to. A per-spawn FIFO
+//! path is the fallback: the emitter writes newline-delimited JSON there and
+//! this reader feeds it into the same [`ShellSession`] the OSC parser feeds —
+//! a purely additive second producer, applied via
+//! [`ShellTabState::apply_sidecar_event`](crate::shell_integration::ShellTabState::apply_sidecar_event).
 //!
 //! Unix only (gated at the `pub mod sock;` declaration). The crate already
 //! depends on `libc` (see `shell_env.rs`).
@@ -23,11 +20,10 @@ use std::time::Duration;
 use parking_lot::Mutex;
 
 use crate::pty::ShellSession;
-use crate::shell_integration::ShellEvent;
 
-/// Optional per-event callback (e.g. the desktop frontend bridge that emits a
-/// Tauri event). Runs *after* the [`ShellSession`] has been updated.
-pub type CliAgentCallback = Box<dyn Fn(&crate::cli_agent::CliAgentEvent) + Send>;
+/// Optional per-event callback (e.g. a frontend bridge that emits a UI
+/// event). Runs *after* the [`ShellSession`] has been updated.
+pub type SidecarCallback = Box<dyn Fn(&serde_json::Value) + Send>;
 
 /// RAII guard for a running FIFO reader. Dropping it stops the reader thread,
 /// joins the reader thread, and unlinks the FIFO.
@@ -54,21 +50,21 @@ impl Drop for SockReader {
 ///
 /// `mkfifo`s `path` mode `0o600` (unlinking + recreating if it already exists),
 /// opens it `O_RDWR | O_NONBLOCK | O_CLOEXEC`, and loops reading
-/// newline-delimited JSON payloads. For each complete line that
-/// [`crate::cli_agent::parse_cli_agent_payload`] accepts, it locks `shell` and
-/// applies the event to **both** `state` (so
-/// [`crate::shell_integration::ShellTabState::apply`] sets `cli_agent: Some`,
-/// which the idle-watcher guard checks) and `pending_events` (what frontends
-/// drain) — exactly what the OSC reader does in `pty/session.rs`. Then the
-/// optional `callback` runs with the event.
+/// newline-delimited JSON payloads. For each complete line that parses as
+/// JSON, it locks `shell` and applies the value via
+/// `ShellTabState::apply_sidecar_event` (so the idle-watcher-style
+/// `state.sidecar.is_some()` guard sees it) and pushes
+/// `ShellEvent::Sidecar(value)` to `pending_events` (what frontends drain) —
+/// exactly what the OSC reader does in `pty/session.rs`. Then the optional
+/// `callback` runs with the raw value.
 ///
 /// O_RDWR on a FIFO never blocks on open and never EOFs even when every writer
-/// (each short-lived hook process) closes, so the reader stays valid for the
-/// whole session regardless of writer churn.
+/// (each short-lived emitter process) closes, so the reader stays valid for
+/// the whole session regardless of writer churn.
 pub fn spawn_reader(
     path: PathBuf,
     shell: Arc<Mutex<ShellSession>>,
-    callback: Option<CliAgentCallback>,
+    callback: Option<SidecarCallback>,
 ) -> std::io::Result<SockReader> {
     use std::os::unix::ffi::OsStrExt;
 
@@ -93,7 +89,7 @@ pub fn spawn_reader(
     // (it daemonizes by forking before any runtime is built), where
     // `spawn_blocking` panics. An OS thread works with or without a runtime.
     let handle = std::thread::Builder::new()
-        .name("cli-agent-sock".into())
+        .name("sidecar-sock".into())
         .spawn(move || run(path_for_task, shell, callback, stop_for_task))?;
 
     Ok(SockReader {
@@ -106,7 +102,7 @@ pub fn spawn_reader(
 fn run(
     path: PathBuf,
     shell: Arc<Mutex<ShellSession>>,
-    callback: Option<CliAgentCallback>,
+    callback: Option<SidecarCallback>,
     stop: Arc<AtomicBool>,
 ) {
     use std::io::Read;
@@ -116,14 +112,15 @@ fn run(
     let c_path = match std::ffi::CString::new(path.as_os_str().as_bytes()) {
         Ok(p) => p,
         Err(e) => {
-            tracing::warn!(error = %e, "cli-agent sock: non-UTF8/NUL path");
+            tracing::warn!(error = %e, "sidecar sock: non-UTF8/NUL path");
             return;
         }
     };
     // O_RDWR keeps the FIFO readable across writer churn (a plain O_RDONLY
-    // would EOF every time the last hook process exits). O_NONBLOCK so reads
-    // return WouldBlock instead of parking the blocking task forever, letting
-    // us observe `stop`. O_CLOEXEC so spawned children never inherit this fd.
+    // would EOF every time the last emitter process exits). O_NONBLOCK so
+    // reads return WouldBlock instead of parking the blocking task forever,
+    // letting us observe `stop`. O_CLOEXEC so spawned children never inherit
+    // this fd.
     // SAFETY: `c_path` outlives the call; `open` only reads it.
     let fd = unsafe {
         libc::open(
@@ -135,7 +132,7 @@ fn run(
         tracing::warn!(
             error = %std::io::Error::last_os_error(),
             path = %path.display(),
-            "cli-agent sock: open failed"
+            "sidecar sock: open failed"
         );
         let _ = unlink(&path);
         return;
@@ -172,7 +169,7 @@ fn run(
                 continue;
             }
             Err(e) => {
-                tracing::debug!(error = %e, "cli-agent sock: read error, stopping reader");
+                tracing::debug!(error = %e, "sidecar sock: read error, stopping reader");
                 break;
             }
         }
@@ -186,29 +183,32 @@ fn run(
 fn drain_lines(
     acc: &mut Vec<u8>,
     shell: &Arc<Mutex<ShellSession>>,
-    callback: Option<&(dyn Fn(&crate::cli_agent::CliAgentEvent) + Send)>,
+    callback: Option<&(dyn Fn(&serde_json::Value) + Send)>,
 ) {
+    use crate::shell_integration::ShellEvent;
+
     while let Some(nl) = acc.iter().position(|&b| b == b'\n') {
         let line: Vec<u8> = acc.drain(..=nl).collect();
         let line = &line[..line.len() - 1]; // drop the '\n'
         let Ok(text) = std::str::from_utf8(line) else {
-            tracing::debug!("cli-agent sock: non-UTF8 line, skipping");
+            tracing::debug!("sidecar sock: non-UTF8 line, skipping");
             continue;
         };
         let text = text.trim();
         if text.is_empty() {
             continue;
         }
-        let Some(ev) = crate::cli_agent::parse_cli_agent_payload(text) else {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+            tracing::debug!("sidecar sock: malformed JSON line, skipping");
             continue;
         };
         {
             let mut s = shell.lock();
-            s.state.apply(&ShellEvent::CliAgent(ev.clone()));
-            s.pending_events.push(ShellEvent::CliAgent(ev.clone()));
+            s.state.apply_sidecar_event(value.clone());
+            s.pending_events.push(ShellEvent::Sidecar(value.clone()));
         }
         if let Some(cb) = callback {
-            cb(&ev);
+            cb(&value);
         }
     }
 }
@@ -232,14 +232,44 @@ fn unlink(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shell_integration::{ShellEvent, ShellTabState};
     use std::io::Write;
+
+    #[derive(Default)]
+    struct FakeSidecar(Option<serde_json::Value>);
+    impl crate::shell_integration::SidecarState for FakeSidecar {
+        fn apply(&mut self, event: serde_json::Value) {
+            self.0 = Some(event);
+        }
+        fn snapshot(&self) -> serde_json::Value {
+            self.0.clone().unwrap_or(serde_json::Value::Null)
+        }
+        fn restore(&mut self, snapshot: serde_json::Value) {
+            self.0 = Some(snapshot);
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+    }
+
+    fn shell_with_factory() -> ShellSession {
+        ShellSession {
+            state: ShellTabState::with_sidecar_factory(std::sync::Arc::new(|| {
+                Box::new(FakeSidecar::default()) as Box<dyn crate::shell_integration::SidecarState>
+            })),
+            pending_events: Vec::new(),
+        }
+    }
 
     /// Regression: the FIFO reader must spawn with NO tokio runtime present.
     /// The session daemon runs synchronously (it forks before building a
     /// runtime), so a `tokio::task::spawn_blocking` here panicked on the
     /// daemon's connection thread and closed the socket mid-reply — every
-    /// tab with a cli-agent FIFO (Claude tabs, and shell tabs) failed to
-    /// spawn through the daemon with "failed to fill whole buffer".
+    /// tab with a sidecar FIFO failed to spawn through the daemon with
+    /// "failed to fill whole buffer".
     #[test]
     fn spawn_reader_works_without_a_tokio_runtime() {
         let dir = tempfile::tempdir().unwrap();
@@ -257,7 +287,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("rt.sock");
 
-        let shell = Arc::new(Mutex::new(ShellSession::default()));
+        let shell = Arc::new(Mutex::new(shell_with_factory()));
         let reader = spawn_reader(sock.clone(), Arc::clone(&shell), None).expect("reader starts");
 
         // Reader mkfifo's on a blocking task; wait for the FIFO to appear.
@@ -269,17 +299,17 @@ mod tests {
         }
         assert!(sock.exists(), "FIFO should have been created by the reader");
 
-        // Write two newline-delimited JSON payloads (a `stop` and a
-        // `permission_request`) into the FIFO, the way a hook script would.
-        let stop = r#"{"v":1,"agent":"claude","event":"stop","session_id":"s1","response":"done"}"#;
-        let perm = r#"{"v":1,"agent":"claude","event":"permission_request","session_id":"s1","tool_name":"Bash","summary":"Wants to run Bash: ls"}"#;
+        // Write two newline-delimited JSON payloads, the way an emitter
+        // would.
+        let first = r#"{"event":"stop","session_id":"s1","response":"done"}"#;
+        let second = r#"{"event":"permission_request","session_id":"s1","tool_name":"Bash"}"#;
         {
             let mut w = std::fs::OpenOptions::new()
                 .write(true)
                 .open(&sock)
                 .expect("open FIFO for writing");
-            writeln!(w, "{stop}").unwrap();
-            writeln!(w, "{perm}").unwrap();
+            writeln!(w, "{first}").unwrap();
+            writeln!(w, "{second}").unwrap();
             w.flush().unwrap();
         }
 
@@ -299,20 +329,14 @@ mod tests {
         }
 
         assert_eq!(got.len(), 2, "both payloads should arrive: got {got:?}");
-        assert!(matches!(
-            got[0],
-            ShellEvent::CliAgent(crate::cli_agent::CliAgentEvent::Stop { .. })
-        ));
-        assert!(matches!(
-            got[1],
-            ShellEvent::CliAgent(crate::cli_agent::CliAgentEvent::PermissionRequest { .. })
-        ));
+        assert!(matches!(got[0], ShellEvent::Sidecar(_)));
+        assert!(matches!(got[1], ShellEvent::Sidecar(_)));
 
         // State must also have been updated (load-bearing: the idle-watcher
-        // guard checks `state.cli_agent.is_some()`).
+        // guard checks `state.sidecar.is_some()`).
         {
             let s = shell.lock();
-            assert!(s.state.cli_agent.is_some(), "ShellTabState.cli_agent set");
+            assert!(s.state.sidecar.is_some(), "ShellTabState.sidecar set");
         }
 
         drop(reader);

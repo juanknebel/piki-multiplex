@@ -35,6 +35,9 @@ pub struct OscParser {
     /// Finalised (ANSI-stripped, trimmed) command waiting to be attached to
     /// the next [`ShellEvent::CommandEnd`]. Cleared once emitted.
     pending_command: Option<String>,
+    /// OSC 777 target this parser claims as a sidecar payload, if any. `None`
+    /// means OSC 777 is entirely ignored (left for the downstream emulator).
+    sidecar_osc_target: Option<String>,
 }
 
 #[derive(Debug)]
@@ -50,13 +53,23 @@ enum State {
 }
 
 impl OscParser {
+    /// A parser with no sidecar target configured — OSC 777 sequences are
+    /// entirely ignored, no matter their target.
     pub fn new() -> Self {
+        Self::with_sidecar_target(None)
+    }
+
+    /// A parser that claims OSC 777 sequences whose target matches
+    /// `sidecar_osc_target` (emitted as [`ShellEvent::Sidecar`]); any other
+    /// target is left untouched, exactly like an unknown OSC.
+    pub fn with_sidecar_target(sidecar_osc_target: Option<String>) -> Self {
         Self {
             state: State::Normal,
             buf: Vec::new(),
             command_buf: Vec::new(),
             capturing_command: false,
             pending_command: None,
+            sidecar_osc_target,
         }
     }
 
@@ -130,7 +143,7 @@ impl OscParser {
     fn flush(&mut self, out: &mut Vec<ShellEvent>) {
         let payload = std::mem::take(&mut self.buf);
         self.state = State::Normal;
-        let Some(event) = parse_payload(&payload) else {
+        let Some(event) = parse_payload(&payload, self.sidecar_osc_target.as_deref()) else {
             return;
         };
         match event {
@@ -160,37 +173,36 @@ impl Default for OscParser {
     }
 }
 
-fn parse_payload(payload: &[u8]) -> Option<ShellEvent> {
+fn parse_payload(payload: &[u8], sidecar_osc_target: Option<&str>) -> Option<ShellEvent> {
     let s = std::str::from_utf8(payload).ok()?;
     let (id, rest) = s.split_once(';').unwrap_or((s, ""));
     match id {
         "133" => parse_osc_133(rest),
         "7" => parse_osc_7(rest),
-        "777" => parse_osc_777(rest),
+        "777" => parse_osc_777(rest, sidecar_osc_target?),
         "0" | "1" | "2" => Some(ShellEvent::WindowTitle(rest.to_string())),
         _ => None,
     }
 }
 
 /// OSC 777 is shared turf (Warp's `warp://cli-agent`, urxvt `notify`, VTE…).
-/// We only claim sequences whose target is exactly piki's
-/// [`CLI_AGENT_TARGET`](crate::cli_agent::CLI_AGENT_TARGET); anything
-/// else returns `None` and is left for the downstream emulator, exactly like
-/// any other unknown OSC.
+/// We only claim sequences whose target is exactly `sidecar_osc_target`;
+/// anything else returns `None` and is left for the downstream emulator,
+/// exactly like any other unknown OSC.
 ///
 /// `rest` is `notify;<target>;<json>`. We `splitn(3)` so semicolons inside
 /// the JSON body survive the framing split.
-fn parse_osc_777(rest: &str) -> Option<ShellEvent> {
+fn parse_osc_777(rest: &str, sidecar_osc_target: &str) -> Option<ShellEvent> {
     let mut parts = rest.splitn(3, ';');
     if parts.next()? != "notify" {
         return None;
     }
-    if parts.next()? != crate::cli_agent::CLI_AGENT_TARGET {
+    if parts.next()? != sidecar_osc_target {
         return None;
     }
     let json = parts.next()?;
-    let event = crate::cli_agent::parse_cli_agent_payload(json)?;
-    Some(ShellEvent::CliAgent(event))
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    Some(ShellEvent::Sidecar(value))
 }
 
 fn parse_osc_133(rest: &str) -> Option<ShellEvent> {
@@ -346,6 +358,13 @@ mod tests {
         p.feed(input)
     }
 
+    const TEST_TARGET: &str = "test://sidecar";
+
+    fn parse_one_with_target(input: &[u8]) -> Vec<ShellEvent> {
+        let mut p = OscParser::with_sidecar_target(Some(TEST_TARGET.to_string()));
+        p.feed(input)
+    }
+
     #[test]
     fn osc_133_a_emits_prompt_start() {
         let events = parse_one(b"\x1b]133;A\x07");
@@ -424,69 +443,65 @@ mod tests {
     }
 
     #[test]
-    fn osc_777_piki_target_emits_cli_agent_event() {
-        use crate::cli_agent::CliAgentEvent;
+    fn osc_777_matching_target_emits_sidecar_event() {
         let json = r#"{"v":1,"event":"prompt_submit","session_id":"s1"}"#;
-        let seq = format!("\x1b]777;notify;piki://cli-agent;{json}\x07");
-        let events = parse_one(seq.as_bytes());
+        let seq = format!("\x1b]777;notify;{TEST_TARGET};{json}\x07");
+        let events = parse_one_with_target(seq.as_bytes());
         assert_eq!(
             events,
-            vec![ShellEvent::CliAgent(CliAgentEvent::UserPromptSubmit {
-                session_id: "s1".into()
-            })]
+            vec![ShellEvent::Sidecar(serde_json::from_str(json).unwrap())]
         );
     }
 
     #[test]
+    fn osc_777_is_ignored_with_no_target_configured() {
+        // A parser built via `OscParser::new()` (no sidecar target) never
+        // claims OSC 777, no matter what it says.
+        let json = r#"{"v":1,"event":"stop","session_id":"s"}"#;
+        let seq = format!("\x1b]777;notify;{TEST_TARGET};{json}\x07");
+        assert!(parse_one(seq.as_bytes()).is_empty());
+    }
+
+    #[test]
     fn osc_777_foreign_target_is_ignored() {
-        // Warp's own sequence must not be claimed by us.
+        // Some other tool's OSC 777 sequence must not be claimed by us.
         let warp = b"\x1b]777;notify;warp://cli-agent;{\"event\":\"stop\"}\x07";
-        assert!(parse_one(warp).is_empty());
-        // urxvt-style `OSC 777;notify;title;body` (no piki target) too.
+        assert!(parse_one_with_target(warp).is_empty());
+        // urxvt-style `OSC 777;notify;title;body` (no matching target) too.
         let urxvt = b"\x1b]777;notify;Build done;all green\x07";
-        assert!(parse_one(urxvt).is_empty());
+        assert!(parse_one_with_target(urxvt).is_empty());
     }
 
     #[test]
     fn osc_777_json_with_semicolons_survives_framing_split() {
-        use crate::cli_agent::CliAgentEvent;
         let json = r#"{"v":1,"event":"stop","session_id":"s","response":"a; b; c"}"#;
-        let seq = format!("\x1b]777;notify;piki://cli-agent;{json}\x07");
-        let events = parse_one(seq.as_bytes());
+        let seq = format!("\x1b]777;notify;{TEST_TARGET};{json}\x07");
+        let events = parse_one_with_target(seq.as_bytes());
         assert_eq!(
             events,
-            vec![ShellEvent::CliAgent(CliAgentEvent::Stop {
-                session_id: "s".into(),
-                query: None,
-                response: Some("a; b; c".into()),
-                transcript_path: None,
-            })]
+            vec![ShellEvent::Sidecar(serde_json::from_str(json).unwrap())]
         );
     }
 
     #[test]
     fn osc_777_split_across_chunks() {
-        use crate::cli_agent::CliAgentEvent;
         let json = r#"{"v":1,"event":"tool_complete","session_id":"s","tool_name":"Bash"}"#;
-        let seq = format!("\x1b]777;notify;piki://cli-agent;{json}\x07");
-        let mut p = OscParser::new();
+        let seq = format!("\x1b]777;notify;{TEST_TARGET};{json}\x07");
+        let mut p = OscParser::with_sidecar_target(Some(TEST_TARGET.to_string()));
         let mut all = Vec::new();
         for chunk in seq.as_bytes().chunks(3) {
             all.extend(p.feed(chunk));
         }
         assert_eq!(
             all,
-            vec![ShellEvent::CliAgent(CliAgentEvent::PostToolUse {
-                session_id: "s".into(),
-                tool_name: Some("Bash".into()),
-            })]
+            vec![ShellEvent::Sidecar(serde_json::from_str(json).unwrap())]
         );
     }
 
     #[test]
     fn osc_777_malformed_json_yields_no_event() {
-        let seq = b"\x1b]777;notify;piki://cli-agent;not json at all\x07";
-        assert!(parse_one(seq).is_empty());
+        let seq = format!("\x1b]777;notify;{TEST_TARGET};not json at all\x07");
+        assert!(parse_one_with_target(seq.as_bytes()).is_empty());
     }
 
     #[test]

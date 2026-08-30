@@ -20,14 +20,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use parking_lot::Mutex;
 use portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
-use crate::cli_agent::sock::SockReader;
 use crate::pty::ShellSession;
 use crate::session::protocol::{
     Frame, SessionInfo, SessionMeta, SessionState, ShellStateSnapshot, SpawnRequest,
 };
 use crate::session::restore::restore_buffer;
-use crate::shell_integration::ShellEvent;
 use crate::shell_integration::parser::OscParser;
+use crate::shell_integration::{ShellEvent, ShellTabState, SidecarConfig};
+use crate::sidecar::sock::SockReader;
 
 /// Depth of a client's outbound queue. A client that falls this far behind is
 /// dropped (its terminal is a lost cause anyway) rather than back-pressuring
@@ -98,9 +98,12 @@ pub struct Session {
     writer: Mutex<Box<dyn Write + Send>>,
     exit: Exit,
     reader: OnceLock<thread::JoinHandle<()>>,
-    /// FIFO reader for the structured cli-agent channel; its `Drop` unlinks
-    /// the FIFO. `None` unless this session has one.
+    /// FIFO reader for the sidecar channel; its `Drop` unlinks the FIFO.
+    /// `None` unless this session has one.
     cli_agent_sock: Mutex<Option<SockReader>>,
+    /// How this daemon interprets its sessions' sidecar channel, if the
+    /// embedding application wired one up.
+    sidecar: Option<SidecarConfig>,
 }
 
 fn now_ms() -> u64 {
@@ -115,7 +118,10 @@ impl Session {
     ///
     /// The caller's environment is applied verbatim after `env_clear`, so a
     /// session spawned by either frontend behaves identically.
-    pub fn spawn(req: &SpawnRequest) -> anyhow::Result<Arc<Session>> {
+    pub fn spawn(
+        req: &SpawnRequest,
+        sidecar: Option<SidecarConfig>,
+    ) -> anyhow::Result<Arc<Session>> {
         let pty = native_pty_system();
         let pair = pty.openpty(PtySize {
             rows: req.rows,
@@ -139,9 +145,16 @@ impl Session {
         let mut reader = pair.master.try_clone_reader()?;
         let writer = pair.master.take_writer()?;
 
-        let shell = req
-            .integration_on
-            .then(|| Arc::new(Mutex::new(ShellSession::default())));
+        let shell = req.integration_on.then(|| {
+            let state = match sidecar.as_ref() {
+                Some(sc) => ShellTabState::with_sidecar_factory(sc.factory.clone()),
+                None => ShellTabState::new(),
+            };
+            Arc::new(Mutex::new(ShellSession {
+                state,
+                pending_events: Vec::new(),
+            }))
+        });
 
         let session = Arc::new(Session {
             id: req.id.clone(),
@@ -164,19 +177,20 @@ impl Session {
             exit: Exit::default(),
             reader: OnceLock::new(),
             cli_agent_sock: Mutex::new(None),
+            sidecar,
         });
 
-        // Out-of-band cli-agent FIFO. Its callback fans the structured event
+        // Out-of-band sidecar FIFO. Its callback fans the decoded JSON event
         // to attached clients immediately (an idle agent produces no PTY
         // bytes, so the reader thread can't do it), then clears the
         // `pending_events` the sock reader appends so it never grows. Failure
         // degrades to OSC-777-only status; it never fails the spawn.
         if let (Some(sock_path), Some(shell)) = (&req.cli_agent_sock, session.shell.as_ref()) {
             let weak = Arc::downgrade(&session);
-            let cb: crate::cli_agent::sock::CliAgentCallback = Box::new(move |ev| {
+            let cb: crate::sidecar::sock::SidecarCallback = Box::new(move |ev| {
                 if let Some(session) = weak.upgrade() {
                     session.broadcast(&Frame::ShellEvent {
-                        event: ShellEvent::CliAgent(ev.clone()),
+                        event: ShellEvent::Sidecar(ev.clone()),
                         replayed: false,
                     });
                     if let Some(shell) = &session.shell {
@@ -184,14 +198,11 @@ impl Session {
                     }
                 }
             });
-            match crate::cli_agent::sock::spawn_reader(
-                sock_path.clone(),
-                Arc::clone(shell),
-                Some(cb),
-            ) {
+            match crate::sidecar::sock::spawn_reader(sock_path.clone(), Arc::clone(shell), Some(cb))
+            {
                 Ok(r) => *session.cli_agent_sock.lock() = Some(r),
                 Err(e) => {
-                    tracing::warn!(error = %e, "session cli-agent FIFO reader failed to start")
+                    tracing::warn!(error = %e, "session sidecar FIFO reader failed to start")
                 }
             }
         }
@@ -208,7 +219,8 @@ impl Session {
     /// PTY reader thread body: master → parser + OSC → fan-out.
     fn read_loop(self: Arc<Self>, reader: &mut Box<dyn Read + Send>) {
         let mut buf = [0u8; 65536];
-        let mut osc = OscParser::new();
+        let mut osc =
+            OscParser::with_sidecar_target(self.sidecar.as_ref().map(|sc| sc.osc_target.clone()));
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => break,

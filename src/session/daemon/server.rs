@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use crate::session::protocol::{
     Frame, Hello, PROTOCOL_VERSION, Reply, Request, read_frame, write_frame,
 };
+use crate::shell_integration::SidecarConfig;
 
 use super::session::Session;
 
@@ -38,15 +39,25 @@ pub struct Server {
     shutdown: Arc<AtomicBool>,
     idle_since: Mutex<Option<Instant>>,
     pid: u32,
+    /// How every session on this daemon interprets its sidecar channel, if
+    /// the embedding application wired one up. `None` means the sidecar
+    /// channel (OSC 777 and the FIFO transport) is inert for every session
+    /// this daemon spawns.
+    sidecar: Option<SidecarConfig>,
 }
 
 impl Server {
     pub fn new() -> Arc<Server> {
+        Self::with_sidecar(None)
+    }
+
+    pub fn with_sidecar(sidecar: Option<SidecarConfig>) -> Arc<Server> {
         Arc::new(Server {
             sessions: Mutex::new(HashMap::new()),
             shutdown: Arc::new(AtomicBool::new(false)),
             idle_since: Mutex::new(Some(Instant::now())),
             pid: std::process::id(),
+            sidecar,
         })
     }
 
@@ -151,7 +162,7 @@ impl Server {
             Request::Spawn(sr) => {
                 let attach = sr.attach;
                 let (rows, cols) = (sr.rows, sr.cols);
-                match Session::spawn(&sr) {
+                match Session::spawn(&sr, self.sidecar.clone()) {
                     Ok(session) => {
                         let info = session.info();
                         self.sessions

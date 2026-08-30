@@ -12,6 +12,8 @@ use std::sync::Arc;
 
 use anyhow::Context;
 
+use crate::shell_integration::SidecarConfig;
+
 use super::Server;
 
 /// The daemon's own file layout: sockets, locks, pid file, log — supplied by
@@ -30,7 +32,17 @@ pub struct DaemonPaths {
 /// Run the session daemon for `paths`. Unless `foreground`, it detaches from
 /// the controlling terminal first. Returns once the daemon stops (idle-exit,
 /// a `Shutdown` request, or a termination signal).
-pub fn run(paths: &DaemonPaths, foreground: bool) -> anyhow::Result<()> {
+///
+/// `sidecar`, when given, is used for every session this daemon spawns
+/// that asks for the sidecar channel (`SpawnRequest.cli_agent_sock`) — the
+/// embedding application supplies it once here rather than per spawn, since
+/// it can't be sent over the wire (it carries a Rust closure). `None` means
+/// the sidecar channel is inert daemon-wide.
+pub fn run(
+    paths: &DaemonPaths,
+    foreground: bool,
+    sidecar: Option<SidecarConfig>,
+) -> anyhow::Result<()> {
     fs::create_dir_all(&paths.sessions_dir).context("creating sessions dir")?;
     fs::create_dir_all(&paths.log_dir).ok();
 
@@ -65,7 +77,7 @@ pub fn run(paths: &DaemonPaths, foreground: bool) -> anyhow::Result<()> {
         .with_context(|| format!("binding session socket at {}", socket.display()))?;
     restrict_permissions(&socket);
 
-    let server = Server::new();
+    let server = Server::with_sidecar(sidecar);
     install_signal_cleanup(&server);
 
     tracing::info!(socket = %socket.display(), "session daemon listening");

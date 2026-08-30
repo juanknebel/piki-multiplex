@@ -9,11 +9,17 @@
 //!   `docs/persistent-sessions.md` in the workspace root for the design.
 //! - [`shell_integration`] — OSC 133 (prompt/command markers) and OSC 7 (cwd)
 //!   parsing, turning a PTY byte stream into structured [`shell_integration::ShellEvent`]s.
-//! - [`cli_agent`] — an optional, opinionated out-of-band channel (FIFO +
-//!   OSC 777) for a structured agent-lifecycle event stream. Inert unless a
-//!   caller opts in by passing a `cli_agent_sock` path at spawn time.
+//!   Also defines [`shell_integration::SidecarState`], the generic out-of-band
+//!   event seam a caller implements to interpret its own hook integration
+//!   (Claude, Codex, or anything else) — this crate carries no such
+//!   vocabulary itself.
+//! - [`sidecar`] — the generic transport for that seam: a FIFO reader that
+//!   decodes JSON and feeds it to a spawn's [`shell_integration::SidecarState`],
+//!   the out-of-band sibling of the in-band OSC 777 path in
+//!   [`shell_integration::parser`]. Inert unless a caller opts in by
+//!   supplying a [`shell_integration::SidecarConfig`] at spawn time.
 
-pub mod cli_agent;
 pub mod pty;
 pub mod session;
 pub mod shell_integration;
+pub mod sidecar;

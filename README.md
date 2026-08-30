@@ -34,12 +34,24 @@ restore semantics, failure modes) still lives at `docs/persistent-sessions.md`
 - **`shell_integration`** — OSC 133 (prompt/command markers) and OSC 7 (cwd)
   streaming parser, plus install scripts (zsh/bash/fish, Linux/macOS only)
   that make a shell source the integration bridge before its own dotfiles.
-- **`cli_agent`** — an optional, opinionated out-of-band channel (a per-tab
-  FIFO plus an OSC 777 target string) carrying a structured agent-lifecycle
-  event vocabulary shaped for Claude Code's hook JSON. Inert unless a caller
-  passes a `cli_agent_sock` path at spawn time. This is the one piece of this
-  crate that isn't domain-neutral — see the note at the top of
-  `src/cli_agent/mod.rs`.
+  Also defines the generic out-of-band seam: [`SidecarState`] (a trait a
+  caller implements to interpret its own hook/agent event vocabulary — this
+  crate carries none of its own) and [`SidecarConfig`] (which OSC 777 target
+  string to claim, and a factory that constructs a fresh `SidecarState`).
+- **`sidecar`** — the transport for that seam: `sock::spawn_reader` reads a
+  per-tab FIFO of newline-delimited JSON and feeds it to
+  `ShellTabState::apply_sidecar_event`, the out-of-band sibling of the
+  in-band OSC 777 path in `shell_integration::parser`. Carries no event
+  vocabulary itself — it only moves JSON. Both the FIFO and OSC 777 paths are
+  inert no-ops unless a caller supplies a `SidecarConfig` at spawn time (and,
+  for the FIFO, a `cli_agent_sock` path).
+
+This crate is domain-neutral: it has no built-in notion of Claude, Codex, or
+any other agent. A consumer that wants a structured out-of-band agent-status
+channel implements `SidecarState` itself — see
+[agent-multi](https://github.com/juanknebel/piki-multi-ai)'s `piki-core`
+crate (`cli_agent/` module) for a real example (Claude Code / Antigravity
+hook payloads, decoded from the same generic JSON this crate hands it).
 
 ## vt100 dependency
 

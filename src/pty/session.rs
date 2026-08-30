@@ -9,7 +9,7 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use crate::session::client::{Attachment, AttachmentSender};
 use crate::session::protocol::{Frame, read_frame};
 use crate::shell_integration::parser::OscParser;
-use crate::shell_integration::{ShellEvent, ShellTabState};
+use crate::shell_integration::{ShellEvent, ShellTabState, SidecarConfig, SidecarFactory};
 
 /// Per-session shell-integration state shared between the PTY reader thread
 /// (which mutates) and consumers (which read and drain pending events).
@@ -79,12 +79,12 @@ pub struct LocalPty {
     /// Present iff this session was spawned with shell integration enabled.
     /// Reader thread parses OSC sequences and mutates this; UI threads read.
     shell: Option<Arc<Mutex<ShellSession>>>,
-    /// Out-of-band FIFO reader for the structured cli-agent channel. `Some`
-    /// only for tabs spawned with a `cli_agent_sock` path (Claude tabs, and
-    /// shell tabs so a manually-run `claude` can report too). Its `Drop`
-    /// stops the reader and unlinks the FIFO.
+    /// Out-of-band FIFO reader for the sidecar channel. `Some` only for tabs
+    /// spawned with both a `cli_agent_sock` path and a [`SidecarConfig`]
+    /// (e.g. Claude tabs, and shell tabs so a manually-run `claude` can
+    /// report too). Its `Drop` stops the reader and unlinks the FIFO.
     #[cfg(unix)]
-    _cli_agent_sock: Option<crate::cli_agent::sock::SockReader>,
+    _cli_agent_sock: Option<crate::sidecar::sock::SockReader>,
 }
 
 /// Start the per-session writer thread and return its input queue.
@@ -119,10 +119,12 @@ impl LocalPty {
     /// updates the per-tab [`ShellTabState`].
     ///
     /// `cli_agent_sock` (when `Some` *and* `enable_shell_integration`) is the
-    /// per-spawn FIFO path the Claude hook scripts write structured lifecycle
-    /// events to out-of-band; we start a reader that feeds the same
-    /// [`ShellSession`] the OSC parser feeds (the in-band OSC 777 path stays as
-    /// a fallback).
+    /// per-spawn FIFO path an out-of-band emitter writes structured events
+    /// to; we start a reader that feeds the same [`ShellSession`] the OSC
+    /// parser feeds (the in-band OSC 777 path stays as a fallback). Both
+    /// paths are inert unless `sidecar` is also `Some` — it supplies the OSC
+    /// 777 target to claim and the factory that gives the decoded JSON
+    /// meaning.
     ///
     /// `output_signal` (usually one shared instance per frontend) is raised by
     /// the reader thread after each parser flush, so an event loop can sleep
@@ -138,6 +140,7 @@ impl LocalPty {
         extra_args: &[String],
         enable_shell_integration: bool,
         cli_agent_sock: Option<std::path::PathBuf>,
+        sidecar: Option<SidecarConfig>,
         output_signal: Option<PtyOutputSignal>,
     ) -> anyhow::Result<Self> {
         let pty_system = native_pty_system();
@@ -174,8 +177,17 @@ impl LocalPty {
         let bytes_processed = Arc::new(AtomicU64::new(0));
         let bytes_clone = Arc::clone(&bytes_processed);
 
+        let sidecar_factory: Option<SidecarFactory> = sidecar.as_ref().map(|s| s.factory.clone());
+        let sidecar_osc_target = sidecar.as_ref().map(|s| s.osc_target.clone());
         let shell = if enable_shell_integration {
-            Some(Arc::new(Mutex::new(ShellSession::default())))
+            let state = match &sidecar_factory {
+                Some(factory) => ShellTabState::with_sidecar_factory(Arc::clone(factory)),
+                None => ShellTabState::new(),
+            };
+            Some(Arc::new(Mutex::new(ShellSession {
+                state,
+                pending_events: Vec::new(),
+            })))
         } else {
             None
         };
@@ -189,7 +201,7 @@ impl LocalPty {
             let mut batch = Vec::with_capacity(65536);
             // Streaming OSC parser keeps state across PTY chunks. Lives only
             // inside this task; the main thread reads results via `shell`.
-            let mut osc_parser = OscParser::new();
+            let mut osc_parser = OscParser::with_sidecar_target(sidecar_osc_target);
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => {
@@ -255,10 +267,10 @@ impl LocalPty {
         #[cfg(unix)]
         let cli_agent_sock = match (cli_agent_sock, shell.as_ref()) {
             (Some(path), Some(shell)) => {
-                match crate::cli_agent::sock::spawn_reader(path, Arc::clone(shell), None) {
+                match crate::sidecar::sock::spawn_reader(path, Arc::clone(shell), None) {
                     Ok(reader) => Some(reader),
                     Err(e) => {
-                        tracing::warn!(error = %e, "cli-agent FIFO reader failed to start; OSC 777 fallback only");
+                        tracing::warn!(error = %e, "sidecar FIFO reader failed to start; OSC 777 fallback only");
                         None
                     }
                 }
@@ -393,10 +405,13 @@ impl RemotePty {
     /// `integration_on` mirrors the flag the session was spawned with: when
     /// set, a client-side [`ShellSession`] is kept so the Agents pane can read
     /// live status; the daemon only sends shell/agent frames for such
-    /// sessions.
+    /// sessions. `sidecar_factory`, when given, lets this client-side state
+    /// interpret `ShellEvent::Sidecar`/restored snapshots the same way the
+    /// daemon does.
     pub fn start(
         att: Attachment,
         integration_on: bool,
+        sidecar_factory: Option<SidecarFactory>,
         output_signal: Option<PtyOutputSignal>,
     ) -> Self {
         let (rows, cols) = (att.rows, att.cols);
@@ -407,7 +422,7 @@ impl RemotePty {
         )));
         let shell = integration_on.then(|| {
             Arc::new(Mutex::new(ShellSession {
-                state: ShellTabState::from_snapshot(&att.shell),
+                state: ShellTabState::from_snapshot(&att.shell, sidecar_factory.as_ref()),
                 pending_events: Vec::new(),
             }))
         });
@@ -430,6 +445,7 @@ impl RemotePty {
                         read,
                         &parser,
                         shell.as_ref(),
+                        sidecar_factory.as_ref(),
                         &bytes,
                         &alive,
                         &size,
@@ -512,6 +528,7 @@ fn remote_reader_loop(
     mut read: std::os::unix::net::UnixStream,
     parser: &Arc<Mutex<vt100::Parser>>,
     shell: Option<&Arc<Mutex<ShellSession>>>,
+    sidecar_factory: Option<&SidecarFactory>,
     bytes: &Arc<AtomicU64>,
     alive: &Arc<AtomicBool>,
     size: &Arc<Mutex<(u16, u16)>>,
@@ -542,7 +559,7 @@ fn remote_reader_loop(
             }
             Ok(Frame::ShellState(snap)) => {
                 if let Some(shell) = shell {
-                    shell.lock().state = ShellTabState::from_snapshot(&snap);
+                    shell.lock().state = ShellTabState::from_snapshot(&snap, sidecar_factory);
                     if let Some(sig) = output_signal {
                         sig.raise();
                     }
@@ -612,6 +629,7 @@ impl PtySession {
         extra_args: &[String],
         enable_shell_integration: bool,
         cli_agent_sock: Option<std::path::PathBuf>,
+        sidecar: Option<SidecarConfig>,
         output_signal: Option<PtyOutputSignal>,
     ) -> anyhow::Result<Self> {
         let local = LocalPty::spawn(
@@ -624,19 +642,27 @@ impl PtySession {
             extra_args,
             enable_shell_integration,
             cli_agent_sock,
+            sidecar,
             output_signal,
         )
         .await?;
         Ok(PtySession::Local(local))
     }
 
-    /// Wrap a daemon [`Attachment`] as a remote-backed session.
+    /// Wrap a daemon [`Attachment`] as a remote-backed session. `sidecar_factory`
+    /// mirrors the one the session was spawned with (see [`RemotePty::start`]).
     pub fn from_attachment(
         att: Attachment,
         integration_on: bool,
+        sidecar_factory: Option<SidecarFactory>,
         output_signal: Option<PtyOutputSignal>,
     ) -> Self {
-        PtySession::Remote(RemotePty::start(att, integration_on, output_signal))
+        PtySession::Remote(RemotePty::start(
+            att,
+            integration_on,
+            sidecar_factory,
+            output_signal,
+        ))
     }
 
     /// True for a daemon-backed session (dropping it detaches rather than
