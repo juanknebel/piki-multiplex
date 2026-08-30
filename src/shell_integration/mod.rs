@@ -205,6 +205,17 @@ impl ShellTabState {
     /// out-of-band (e.g. passive status detection with no hook bridge at
     /// all). Requires [`with_sidecar_factory`](Self::with_sidecar_factory) —
     /// a no-op otherwise.
+    /// Materialize the sidecar state (via the configured factory) if it
+    /// doesn't exist yet, and return it for direct mutation — for a caller
+    /// that observes status out-of-band with no JSON event to hand
+    /// [`apply_sidecar_event`](Self::apply_sidecar_event) (e.g. passive
+    /// status detection reading a provider's own title/screen text). `None`
+    /// without a factory configured.
+    pub fn sidecar_or_insert(&mut self) -> Option<&mut Box<dyn SidecarState>> {
+        let factory = self.sidecar_factory.as_ref()?;
+        Some(self.sidecar.get_or_insert_with(|| factory()))
+    }
+
     pub fn apply_sidecar_event(&mut self, json: serde_json::Value) {
         let Some(factory) = self.sidecar_factory.as_ref() else {
             return;
