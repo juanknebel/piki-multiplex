@@ -28,8 +28,11 @@ const HEARTBEAT: Duration = Duration::from_secs(5);
 /// How long an exited session is kept so a restarting frontend can still show
 /// its final screen and exit code.
 const EXITED_TTL: Duration = Duration::from_secs(3600);
-/// How long the daemon stays up with no sessions and no clients before it
-/// stops on its own.
+/// How long the daemon stays up with no sessions left before it stops on
+/// its own. Detached-but-live sessions are NOT idle: they are the whole
+/// point of persistence, so they pin the daemon indefinitely. (Shutting
+/// down here would kill every session — `run` calls `kill_all` on exit —
+/// which is exactly the "sessions survive a while, then all die" bug.)
 const IDLE_EXIT: Duration = Duration::from_secs(60);
 /// Reaper cadence.
 const REAP_INTERVAL: Duration = Duration::from_secs(30);
@@ -377,9 +380,12 @@ impl Server {
         *self.idle_since.lock().unwrap() = idle.then(Instant::now);
     }
 
+    /// `true` only when no sessions remain at all. A live session with
+    /// nobody attached still needs its daemon (otherwise closing the
+    /// frontend would doom every session 60s later); an exited-but-retained
+    /// session pins it too, until the reaper drops it at `EXITED_TTL`.
     fn is_idle(&self) -> bool {
-        let sessions = self.sessions.lock().unwrap();
-        sessions.is_empty() || sessions.values().all(|s| s.attached_count() == 0)
+        self.sessions.lock().unwrap().is_empty()
     }
 
     fn reap_loop(self: &Arc<Self>) {
@@ -488,5 +494,62 @@ fn peer_uid(stream: &UnixStream) -> Option<u32> {
     {
         let _ = stream;
         Some(current_uid())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::protocol::SpawnRequest;
+
+    fn cat_session(id: &str) -> Arc<Session> {
+        Session::spawn(
+            &SpawnRequest {
+                id: id.into(),
+                command: "cat".into(),
+                cwd: std::env::temp_dir(),
+                env: vec![(
+                    "PATH".into(),
+                    std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into()),
+                )],
+                rows: 24,
+                cols: 80,
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn detached_live_sessions_pin_the_daemon() {
+        let server = Server::new();
+        assert!(server.is_idle(), "empty daemon is idle");
+
+        // Nobody attached — but the session is live, so the daemon must
+        // stay up. (The old predicate counted zero attachments as idle and
+        // shut the daemon down ~60s after the frontend closed, killing
+        // every surviving session.)
+        let s = cat_session("pins-daemon");
+        assert!(s.is_live());
+        server
+            .sessions
+            .lock()
+            .unwrap()
+            .insert(s.id.clone(), Arc::clone(&s));
+        assert!(
+            !server.is_idle(),
+            "a live detached session must not count as idle"
+        );
+
+        // An exited-but-retained session pins it too, until reaped.
+        s.kill();
+        assert!(
+            !server.is_idle(),
+            "a retained exited session must not count as idle"
+        );
+
+        server.sessions.lock().unwrap().remove("pins-daemon");
+        assert!(server.is_idle(), "no sessions left means idle");
     }
 }
