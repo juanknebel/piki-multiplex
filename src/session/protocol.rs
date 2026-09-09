@@ -32,7 +32,11 @@ use crate::shell_integration::ShellEvent;
 /// Bump on any incompatible change. The daemon refuses nothing itself — the
 /// *client* decides what to do with a mismatch (`docs/persistent-sessions.md`,
 /// "Failure modes").
-pub const PROTOCOL_VERSION: u32 = 1;
+///
+/// v2 adds `Frame::Answerback`: the client→daemon relay for terminal-query
+/// replies, which the daemon only forwards from the most recently attached
+/// client so multi-client sessions don't double-answer.
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Upper bound on a single frame payload. A restore buffer for a 5000-line
 /// scrollback at 300 columns with attributes is well under 4 MiB; anything
@@ -305,8 +309,16 @@ pub enum Frame {
     Hello(Hello),
     Request(Request),
     Reply(Reply),
-    /// Client → daemon: keystrokes for the PTY.
+    /// Client → daemon: keystrokes for the PTY. Always forwarded.
     Input(Vec<u8>),
+    /// Client → daemon: this client's terminal-query reply (DA1/DSR),
+    /// relayed from its own parser. The daemon forwards it to the PTY only
+    /// while the sender is the designated answerer (the most recently
+    /// attached client); relays from superseded clients are dropped so the
+    /// application never sees duplicates. Kept distinct from [`Frame::Input`]
+    /// so the daemon can tell a relay (gated) from keystrokes (always
+    /// forwarded).
+    Answerback(Vec<u8>),
     /// Daemon → client: live PTY output.
     Output(Vec<u8>),
     /// Daemon → client: restore buffer (screen + scrollback + modes). Sent
@@ -354,6 +366,7 @@ mod kind {
     pub const RESYNC: u8 = 14;
     pub const DETACH: u8 = 15;
     pub const KILL: u8 = 16;
+    pub const ANSWERBACK: u8 = 17;
     pub const SHELL_STATE: u8 = 20;
     pub const SHELL_EVENT: u8 = 21;
     pub const EXITED: u8 = 22;
@@ -404,6 +417,7 @@ impl Frame {
             Frame::Request(r) => (kind::REQUEST, json(r)?),
             Frame::Reply(r) => (kind::REPLY, json(r)?),
             Frame::Input(b) => (kind::INPUT, b.clone()),
+            Frame::Answerback(b) => (kind::ANSWERBACK, b.clone()),
             Frame::Output(b) => (kind::OUTPUT, b.clone()),
             Frame::Restore(b) => (kind::RESTORE, b.clone()),
             Frame::Resize { rows, cols } => (
@@ -441,6 +455,7 @@ impl Frame {
             kind::REQUEST => Frame::Request(parse(&payload)?),
             kind::REPLY => Frame::Reply(parse(&payload)?),
             kind::INPUT => Frame::Input(payload),
+            kind::ANSWERBACK => Frame::Answerback(payload),
             kind::OUTPUT => Frame::Output(payload),
             kind::RESTORE => Frame::Restore(payload),
             kind::RESIZE => {
@@ -486,6 +501,7 @@ impl Frame {
             Frame::Request(_) => "request",
             Frame::Reply(_) => "reply",
             Frame::Input(_) => "input",
+            Frame::Answerback(_) => "answerback",
             Frame::Output(_) => "output",
             Frame::Restore(_) => "restore",
             Frame::Resize { .. } => "resize",
@@ -647,6 +663,7 @@ mod tests {
             message: "nope".into(),
         }));
         round_trip(Frame::Input(b"ls\r".to_vec()));
+        round_trip(Frame::Answerback(b"\x1b[?6c".to_vec()));
         round_trip(Frame::Output(b"\x1b[31mhi\x1b[m".to_vec()));
         round_trip(Frame::Restore(vec![0, 255, 1, 2]));
         round_trip(Frame::Resize {

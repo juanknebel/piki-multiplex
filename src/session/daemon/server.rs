@@ -340,6 +340,11 @@ impl Server {
                 Ok(Frame::Input(b)) => {
                     let _ = session.write_input(&b);
                 }
+                Ok(Frame::Answerback(b)) => {
+                    // Terminal-query relay: only the designated answerer
+                    // (most recently attached client) reaches the PTY.
+                    let _ = session.write_answerback(client_id, &b);
+                }
                 Ok(Frame::Resize { rows, cols }) => session.resize(rows, cols),
                 Ok(Frame::Resync) => {
                     let _ = my_tx.try_send(Frame::Restore(session.restore()));

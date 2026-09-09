@@ -269,6 +269,14 @@ impl AttachmentSender {
         self.send(&Frame::Input(data.to_vec()))
     }
 
+    /// Relay a terminal-query reply (DA1/DSR) from this attachment's parser.
+    /// The daemon forwards it to the PTY only while this attachment is the
+    /// designated answerer (most recently attached); otherwise it is dropped.
+    /// Unlike [`input`](Self::input), never carries user keystrokes.
+    pub fn answerback(&self, data: &[u8]) -> io::Result<()> {
+        self.send(&Frame::Answerback(data.to_vec()))
+    }
+
     pub fn resize(&self, rows: u16, cols: u16) -> io::Result<()> {
         self.send(&Frame::Resize { rows, cols })
     }
@@ -529,5 +537,94 @@ mod tests {
             server.request_shutdown();
             let _ = handle.join();
         }
+    }
+
+    /// `true` if an `Output` frame containing `needle` arrives within
+    /// `timeout`. `cat` echoes its stdin (plus the PTY line discipline), so
+    /// anything the daemon forwards to the child shows up here.
+    fn output_contains(read: &mut UnixStream, needle: &[u8], timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            match read_frame(read) {
+                Ok(Frame::Output(b)) if b.windows(needle.len()).any(|w| w == needle) => {
+                    return true;
+                }
+                Ok(_) => {}
+                Err(e)
+                    if e.kind() == io::ErrorKind::WouldBlock
+                        || e.kind() == io::ErrorKind::TimedOut => {}
+                Err(_) => return false,
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn only_newest_client_answerback_reaches_pty() {
+        let (daemon, _g) = in_process_daemon();
+        let att_a = daemon.spawn_attach(cat_req("ab1")).unwrap();
+        let sender_a = att_a.sender();
+        let (mut read_a, _sa) = att_a.into_read_half();
+        read_a
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+
+        // Second attach: B becomes the designated answerer.
+        let att_b = daemon.attach("ab1", 24, 80).unwrap();
+        let sender_b = att_b.sender();
+        let (mut read_b, _sb) = att_b.into_read_half();
+        read_b
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+
+        // The superseded client's relay must NOT reach the PTY…
+        sender_a.answerback(b"stale-relay-marker\n").unwrap();
+        assert!(
+            !output_contains(&mut read_b, b"stale-relay-marker", Duration::from_secs(1)),
+            "superseded client's answerback must be dropped"
+        );
+
+        // …but its keystrokes still go through (only relays are gated).
+        sender_a.input(b"plain-keystrokes-marker\n").unwrap();
+        assert!(
+            output_contains(&mut read_a, b"plain-keystrokes-marker", Duration::from_secs(10)),
+            "input from any client must always be forwarded"
+        );
+
+        // The designated answerer's relay reaches the PTY exactly once.
+        sender_b.answerback(b"answerer-relay-marker\n").unwrap();
+        assert!(
+            output_contains(&mut read_a, b"answerer-relay-marker", Duration::from_secs(10)),
+            "newest client's answerback must be forwarded"
+        );
+
+        // B detaches → the surviving client takes the role back. EOF on B's
+        // read half proves the daemon processed the detach (it detaches
+        // before tearing the writer down).
+        sender_b.detach().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match read_frame(&mut read_b) {
+                Ok(_) => {}
+                Err(e)
+                    if e.kind() == io::ErrorKind::TimedOut
+                        || e.kind() == io::ErrorKind::WouldBlock =>
+                {
+                    if Instant::now() >= deadline {
+                        break;
+                    }
+                }
+                // EOF / disconnect: the daemon detached first, so the
+                // handover has happened.
+                Err(_) => break,
+            }
+        }
+        drop(read_b);
+
+        sender_a.answerback(b"handover-relay-marker\n").unwrap();
+        assert!(
+            output_contains(&mut read_a, b"handover-relay-marker", Duration::from_secs(10)),
+            "answerer role must hand over to the surviving client"
+        );
     }
 }

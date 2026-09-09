@@ -6,8 +6,10 @@
 //! `vt100` parser (for restore) and the `OscParser` (for shell/agent status),
 //! and — under one lock so no client sees a gap or a duplicate — appends the
 //! bytes to every attached client's outbound queue. Terminal query replies
-//! (DSR/DA) are answered here so an agent that probes the terminal at startup
-//! gets a reply even while nobody is attached.
+//! (DSR/DA) are answered here only while nobody is attached, so an agent that
+//! probes the terminal at startup gets a reply when headless; with a live
+//! client attached, the client's real terminal answers instead (answering
+//! here too would double-answer and break query fences).
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -56,6 +58,12 @@ struct Output {
     parser: vt100::Parser,
     clients: Vec<ClientHandle>,
     next_client_id: u64,
+    /// The designated answerer for terminal queries: the most recently
+    /// attached client. Its `Answerback` relays reach the PTY; relays from
+    /// superseded clients are dropped so the application never sees
+    /// duplicates. `None` while nobody is attached (then the daemon answers
+    /// queries itself — see `on_bytes`).
+    answerer: Option<u64>,
 }
 
 impl Output {
@@ -70,6 +78,14 @@ impl Output {
             }
             Err(TrySendError::Disconnected(_)) => false,
         });
+        // A dropped answerer must not keep the role: hand it to the most
+        // recently attached survivor (or nobody, if none remain).
+        if self
+            .answerer
+            .is_some_and(|a| !self.clients.iter().any(|c| c.id == a))
+        {
+            self.answerer = self.clients.iter().map(|c| c.id).max();
+        }
     }
 }
 
@@ -168,6 +184,7 @@ impl Session {
                 parser: vt100::Parser::new(req.rows, req.cols, DAEMON_SCROLLBACK),
                 clients: Vec::new(),
                 next_client_id: 0,
+                answerer: None,
             }),
             shell,
             child: Mutex::new(child),
@@ -259,7 +276,17 @@ impl Session {
                     replayed: false,
                 });
             }
-            answerback
+            // With a live client attached, the client's real terminal answers
+            // queries (including ones the daemon-side parser doesn't know,
+            // like OSC 10/11). Answering here too would double-answer DA1 and
+            // break query fences (delta's OSC 10 + OSC 11 + DA1 probe), so
+            // only reply while nobody is attached. Always drained above so a
+            // suppressed reply never accumulates.
+            if out.clients.is_empty() {
+                answerback
+            } else {
+                Vec::new()
+            }
         };
 
         if !answerback.is_empty() {
@@ -349,6 +376,20 @@ impl Session {
         w.flush()
     }
 
+    /// Forward a client's terminal-query relay to the child's stdin — but
+    /// only while `client_id` is the designated answerer (the most recently
+    /// attached client). Relays from superseded clients are silently dropped
+    /// so the application sees each query answered exactly once. User
+    /// keystrokes ([`write_input`](Self::write_input)) are never gated.
+    pub fn write_answerback(&self, client_id: u64, data: &[u8]) -> std::io::Result<()> {
+        if self.output.lock().answerer != Some(client_id) {
+            return Ok(());
+        }
+        let mut w = self.writer.lock();
+        w.write_all(data)?;
+        w.flush()
+    }
+
     /// Resize the PTY (and the restore parser) to `rows`×`cols`.
     pub fn resize(&self, rows: u16, cols: u16) {
         *self.size.lock() = (rows, cols);
@@ -427,12 +468,21 @@ impl Session {
             tx: tx.clone(),
             shutdown,
         });
+        // The newcomer takes over answering terminal queries; every other
+        // attached client stays silent so the application sees one reply.
+        out.answerer = Some(id);
         (id, tx, rx)
     }
 
-    /// Deregister a client (on detach / disconnect).
+    /// Deregister a client (on detach / disconnect). When the designated
+    /// answerer leaves, the most recently attached survivor takes over; when
+    /// nobody remains, the daemon answers queries itself again.
     pub fn detach(&self, client_id: u64) {
-        self.output.lock().clients.retain(|c| c.id != client_id);
+        let mut out = self.output.lock();
+        out.clients.retain(|c| c.id != client_id);
+        if out.answerer == Some(client_id) {
+            out.answerer = out.clients.iter().map(|c| c.id).max();
+        }
     }
 
     pub fn attached_count(&self) -> usize {

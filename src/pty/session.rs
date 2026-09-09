@@ -438,6 +438,7 @@ impl RemotePty {
             let bytes = Arc::clone(&bytes);
             let alive = Arc::clone(&alive);
             let size = Arc::clone(&size);
+            let reader_sender = sender.clone();
             std::thread::Builder::new()
                 .name("remote-pty-reader".into())
                 .spawn(move || {
@@ -449,6 +450,7 @@ impl RemotePty {
                         &bytes,
                         &alive,
                         &size,
+                        &reader_sender,
                         output_signal.as_ref(),
                     );
                 })
@@ -532,6 +534,7 @@ fn remote_reader_loop(
     bytes: &Arc<AtomicU64>,
     alive: &Arc<AtomicBool>,
     size: &Arc<Mutex<(u16, u16)>>,
+    sender: &AttachmentSender,
     output_signal: Option<&PtyOutputSignal>,
 ) {
     loop {
@@ -540,10 +543,20 @@ fn remote_reader_loop(
                 // A restore rebuilds the whole terminal, so start from a fresh
                 // parser of the current size before replaying it.
                 let (rows, cols) = *size.lock();
-                {
+                let answerback = {
                     let mut p = parser.lock();
                     *p = vt100::Parser::new(rows, cols, REMOTE_SCROLLBACK);
                     p.process(&b);
+                    p.screen_mut().take_answerback()
+                };
+                // This client's real terminal answers now that the daemon
+                // stays silent while clients are attached: relay any query
+                // reply as an `Answerback` frame (gated daemon-side on the
+                // most recently attached client, so multi-client sessions
+                // answer exactly once). A restore buffer shouldn't contain
+                // queries, but drain anyway so nothing accumulates.
+                if !answerback.is_empty() {
+                    let _ = sender.answerback(&answerback);
                 }
                 bytes.fetch_add(b.len() as u64, Ordering::Relaxed);
                 if let Some(sig) = output_signal {
@@ -551,7 +564,15 @@ fn remote_reader_loop(
                 }
             }
             Ok(Frame::Output(b)) => {
-                parser.lock().process(&b);
+                let answerback = {
+                    let mut p = parser.lock();
+                    p.process(&b);
+                    p.screen_mut().take_answerback()
+                };
+                // Relay terminal-query replies to the daemon (see above).
+                if !answerback.is_empty() {
+                    let _ = sender.answerback(&answerback);
+                }
                 bytes.fetch_add(b.len() as u64, Ordering::Relaxed);
                 if let Some(sig) = output_signal {
                     sig.raise();
