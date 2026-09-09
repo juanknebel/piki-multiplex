@@ -17,7 +17,11 @@ Codex, or any other agent; see `shell_integration::SidecarState` below.
   updates a per-session `ShellSession`. The vendored vt100 (workspace-root
   `[patch.crates-io]`, `vendor/vt100`) queues terminal-query answerbacks (DSR,
   DA1) in `Screen::take_answerback()`; the reader drains that after each parse
-  pass. **All writes to the master go through a per-session `pty-writer`
+  pass. Single-answerer policy: the daemon answers queries only while nobody
+  is attached; an attached client relays its own parser's reply as
+  `Frame::Answerback`, which the daemon forwards only from the most recently
+  attached client — so query fences (delta, neovim, theme probes) see exactly
+  one reply. **All writes to the master go through a per-session `pty-writer`
   thread** (`PtySession::write` only enqueues) — a direct `write(2)` blocks
   once the kernel's PTY input queue fills, which would freeze the caller.
   `PtySession` is a `Local | Remote` facade (`RemotePty` backs it when
@@ -27,9 +31,11 @@ Codex, or any other agent; see `shell_integration::SidecarState` below.
 - `session/` — the persistent-session daemon (design: `docs/persistent-sessions.md`
   in the workspace root). `protocol.rs` is the daemon⇄client wire format:
   `[kind u8][len u32 LE][payload]` frames, JSON for control messages, raw
-  bytes for `Input`/`Output`/`Restore`; every JSON field is `#[serde(default)]`
-  so additive changes stay compatible — bump `PROTOCOL_VERSION` for anything
-  else. `ShellStateSnapshot.sidecar: Option<serde_json::Value>` is forwarded
+  bytes for `Input`/`Output`/`Restore`/`Answerback`; every JSON field is
+  `#[serde(default)]` so additive changes stay compatible — bump
+  `PROTOCOL_VERSION` for anything else (v2 added `Frame::Answerback`: the
+  client→daemon query-relay, gated on the most recently attached client).
+  `ShellStateSnapshot.sidecar: Option<serde_json::Value>` is forwarded
   opaquely — the daemon never interprets it, only whatever the caller's
   `SidecarState::snapshot()` produced. `restore.rs` wraps the vendored vt100's
   `Screen::restore_formatted()` (scrollback + screen + alt screen + modes) and

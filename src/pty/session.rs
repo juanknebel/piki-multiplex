@@ -382,7 +382,9 @@ const REMOTE_SCROLLBACK: usize = 5000;
 /// A PTY session that lives in the [session daemon](crate::session::daemon):
 /// this end holds a `vt100` parser fed by the daemon's restore + output
 /// frames, mirrors the shell/agent state, and sends input/resize/detach over
-/// the socket. Backs [`PtySession::Remote`].
+/// the socket. Its parser's terminal-query replies go back as `Answerback`
+/// frames (the daemon honors only the most recently attached client's).
+/// Backs [`PtySession::Remote`].
 ///
 /// Killing it kills the child in the daemon (the session is retained as
 /// exited); dropping it *detaches* — the whole point is that the session

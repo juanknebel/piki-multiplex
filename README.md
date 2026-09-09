@@ -17,7 +17,11 @@ restore semantics, failure modes) still lives at `docs/persistent-sessions.md`
   accumulates terminal state; the reader optionally feeds bytes through
   `shell_integration::parser::OscParser`. `PtySession` is a `Local | Remote`
   facade — `RemotePty` backs it when attached to the session daemon over a
-  Unix socket — with an identical public API either way. All writes to the
+  Unix socket — with an identical public API either way. Terminal queries
+  (DSR/DA) have a single answerer: the daemon replies only while nobody is
+  attached; otherwise the attached client relays its own terminal's reply
+  (as `Frame::Answerback`, honored only from the most recently attached
+  client), so probing apps see exactly one response. All writes to the
   PTY master go through a per-session writer thread; `PtySession::write` only
   enqueues, since a direct blocking `write(2)` can freeze the caller once the
   kernel's PTY input queue fills.
