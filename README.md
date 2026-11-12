@@ -86,6 +86,13 @@ piki-multiplex = { git = "https://github.com/juanknebel/piki-multiplex", branch 
 
 Linux/macOS only (the daemon uses `fork`/`setsid`/Unix sockets/FIFOs).
 
+## Features
+
+- `daemon` (default) — headless persistent-session daemon (`session::daemon`).
+- `sidecar` (default) — out-of-band FIFO transport (`sidecar` module).
+
+Disable with `default-features = false` for a PTY + parser only build.
+
 ## Environment variables
 
 - `PIKI_SESSION_LOG` — daemon log level (`trace`, `debug`, `info`, `warn`,
