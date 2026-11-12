@@ -507,6 +507,17 @@ fn peer_uid(stream: &UnixStream) -> Option<u32> {
     }
 }
 
+/// Resolve the idle-exit timeout, honoring `PIKI_SESSION_IDLE_SECS` (seconds)
+/// when set to a positive integer, otherwise [`IDLE_EXIT`].
+fn idle_exit_from_env() -> Duration {
+    std::env::var("PIKI_SESSION_IDLE_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(IDLE_EXIT)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -562,16 +573,4 @@ mod tests {
         server.sessions.lock().unwrap().remove("pins-daemon");
         assert!(server.is_idle(), "no sessions left means idle");
     }
-}
-
-
-/// Resolve the idle-exit timeout, honoring `PIKI_SESSION_IDLE_SECS` (seconds)
-/// when set to a positive integer, otherwise [`IDLE_EXIT`].
-fn idle_exit_from_env() -> Duration {
-    std::env::var("PIKI_SESSION_IDLE_SECS")
-        .ok()
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .filter(|&n| n > 0)
-        .map(Duration::from_secs)
-        .unwrap_or(IDLE_EXIT)
 }
