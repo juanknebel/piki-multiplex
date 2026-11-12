@@ -587,14 +587,22 @@ mod tests {
         // …but its keystrokes still go through (only relays are gated).
         sender_a.input(b"plain-keystrokes-marker\n").unwrap();
         assert!(
-            output_contains(&mut read_a, b"plain-keystrokes-marker", Duration::from_secs(10)),
+            output_contains(
+                &mut read_a,
+                b"plain-keystrokes-marker",
+                Duration::from_secs(10)
+            ),
             "input from any client must always be forwarded"
         );
 
         // The designated answerer's relay reaches the PTY exactly once.
         sender_b.answerback(b"answerer-relay-marker\n").unwrap();
         assert!(
-            output_contains(&mut read_a, b"answerer-relay-marker", Duration::from_secs(10)),
+            output_contains(
+                &mut read_a,
+                b"answerer-relay-marker",
+                Duration::from_secs(10)
+            ),
             "newest client's answerback must be forwarded"
         );
 
@@ -623,7 +631,11 @@ mod tests {
 
         sender_a.answerback(b"handover-relay-marker\n").unwrap();
         assert!(
-            output_contains(&mut read_a, b"handover-relay-marker", Duration::from_secs(10)),
+            output_contains(
+                &mut read_a,
+                b"handover-relay-marker",
+                Duration::from_secs(10)
+            ),
             "answerer role must hand over to the surviving client"
         );
     }
