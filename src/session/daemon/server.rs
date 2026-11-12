@@ -62,7 +62,7 @@ impl Server {
 
     /// Like [`Self::with_sidecar`] but with an explicit idle-exit timeout.
     /// `PIKI_SESSION_IDLE_SECS` is honored by [`Self::with_sidecar`]; pass
-    /// [`IDLE_EXIT`] (or any value) here to override it deterministically.
+    /// `IDLE_EXIT` (or any value) here to override it deterministically.
     pub fn with_idle_exit(sidecar: Option<SidecarConfig>, idle_exit: Duration) -> Arc<Server> {
         Arc::new(Server {
             sessions: Mutex::new(HashMap::new()),
