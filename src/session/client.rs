@@ -639,4 +639,37 @@ mod tests {
             "answerer role must hand over to the surviving client"
         );
     }
+
+    #[test]
+    fn ping_fails_on_protocol_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("m.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let _ = write_frame(
+                    &mut stream,
+                    &Frame::Hello(Hello {
+                        protocol: PROTOCOL_VERSION + 1,
+                        ..Default::default()
+                    }),
+                );
+                let _ = stream.flush();
+                // Drain the request so the client's write doesn't block.
+                let _ = read_frame(&mut stream);
+            }
+        });
+        for _ in 0..200 {
+            if socket.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+        let daemon = Daemon::new(socket);
+        match daemon.ping() {
+            Err(ClientError::Incompatible { .. }) => {}
+            other => panic!("expected Incompatible, got {other:?}"),
+        }
+    }
 }
