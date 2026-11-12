@@ -50,7 +50,10 @@ pub struct IntegrationSetup {
 /// `base_dir` should be a stable per-user location (e.g. `<data_dir>/shell_integration`).
 /// Returns `None` for unsupported shells; callers spawn those without
 /// integration.
-pub fn setup_for(shell_path: &str, base_dir: &Path) -> crate::error::Result<Option<IntegrationSetup>> {
+pub fn setup_for(
+    shell_path: &str,
+    base_dir: &Path,
+) -> crate::error::Result<Option<IntegrationSetup>> {
     let Some(family) = ShellFamily::detect(shell_path) else {
         return Ok(None);
     };

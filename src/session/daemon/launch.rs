@@ -64,7 +64,9 @@ pub fn run(
             tracing::info!("another session daemon is already running");
             return Ok(());
         }
-        Err(LockError::Io(e)) => return Err(crate::error::Error::Other(format!("locking daemon: {e}"))),
+        Err(LockError::Io(e)) => {
+            return Err(crate::error::Error::Other(format!("locking daemon: {e}")));
+        }
     };
     write_pid(&paths.pid_path);
 

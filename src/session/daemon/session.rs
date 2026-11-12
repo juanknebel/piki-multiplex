@@ -27,9 +27,9 @@ use crate::session::protocol::{
     Frame, SessionInfo, SessionMeta, SessionState, ShellStateSnapshot, SpawnRequest,
 };
 use crate::session::restore::restore_buffer;
-use crate::shell_integration::parser::OscParser;
 #[cfg(all(unix, feature = "sidecar"))]
 use crate::shell_integration::ShellEvent;
+use crate::shell_integration::parser::OscParser;
 use crate::shell_integration::{ShellTabState, SidecarConfig};
 #[cfg(all(unix, feature = "sidecar"))]
 use crate::sidecar::sock::SockReader;
