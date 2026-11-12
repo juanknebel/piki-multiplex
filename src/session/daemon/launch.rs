@@ -42,7 +42,7 @@ pub fn run(
     paths: &DaemonPaths,
     foreground: bool,
     sidecar: Option<SidecarConfig>,
-) -> anyhow::Result<()> {
+) -> crate::error::Result<()> {
     fs::create_dir_all(&paths.sessions_dir).context("creating sessions dir")?;
     fs::create_dir_all(&paths.log_dir).ok();
 
@@ -64,7 +64,7 @@ pub fn run(
             tracing::info!("another session daemon is already running");
             return Ok(());
         }
-        Err(LockError::Io(e)) => return Err(e).context("locking daemon"),
+        Err(LockError::Io(e)) => return Err(crate::error::Error::Other(format!("locking daemon: {e}"))),
     };
     write_pid(&paths.pid_path);
 
@@ -86,7 +86,7 @@ pub fn run(
     server.kill_all();
     let _ = fs::remove_file(&socket);
     let _ = fs::remove_file(&paths.pid_path);
-    result.context("serving")
+    result.map_err(|e| crate::error::Error::Other(format!("serving: {e}")))
 }
 
 /// Install the daemon's own tracing subscriber. Uses a plain file writer (no

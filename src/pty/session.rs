@@ -93,7 +93,7 @@ pub struct LocalPty {
 /// gone) or on the first write error (child closed the slave side).
 fn spawn_writer_thread(
     mut writer: Box<dyn Write + Send>,
-) -> anyhow::Result<std::sync::mpsc::Sender<Vec<u8>>> {
+) -> crate::error::Result<std::sync::mpsc::Sender<Vec<u8>>> {
     let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
     std::thread::Builder::new()
         .name("pty-writer".to_string())
@@ -142,7 +142,7 @@ impl LocalPty {
         cli_agent_sock: Option<std::path::PathBuf>,
         sidecar: Option<SidecarConfig>,
         output_signal: Option<PtyOutputSignal>,
-    ) -> anyhow::Result<Self> {
+    ) -> crate::error::Result<Self> {
         let pty_system = native_pty_system();
 
         let size = PtySize {
@@ -319,10 +319,10 @@ impl LocalPty {
     ///
     /// Errors only if the writer thread has already exited, which happens
     /// after the first failed write (the child closed its side).
-    pub fn write(&self, data: &[u8]) -> anyhow::Result<()> {
+    pub fn write(&self, data: &[u8]) -> crate::error::Result<()> {
         self.writer_tx
             .send(data.to_vec())
-            .map_err(|_| anyhow::anyhow!("PTY writer thread has exited"))
+            .map_err(|_| crate::error::Error::Other("PTY writer thread has exited".into()))
     }
 
     /// Get a reference to the vt100 parser for rendering
@@ -336,7 +336,7 @@ impl LocalPty {
     }
 
     /// Resize the PTY when the terminal panel changes size
-    pub fn resize(&self, rows: u16, cols: u16) -> anyhow::Result<()> {
+    pub fn resize(&self, rows: u16, cols: u16) -> crate::error::Result<()> {
         self.master.resize(PtySize {
             rows,
             cols,
@@ -349,7 +349,7 @@ impl LocalPty {
     }
 
     /// Kill the child process
-    pub fn kill(&mut self) -> anyhow::Result<()> {
+    pub fn kill(&mut self) -> crate::error::Result<()> {
         tracing::info!("PTY killed");
         self.child.kill()?;
         Ok(())
@@ -473,7 +473,7 @@ impl RemotePty {
         }
     }
 
-    fn write(&self, data: &[u8]) -> anyhow::Result<()> {
+    fn write(&self, data: &[u8]) -> crate::error::Result<()> {
         self.sender.input(data)?;
         Ok(())
     }
@@ -486,7 +486,7 @@ impl RemotePty {
         self.bytes.load(Ordering::Relaxed)
     }
 
-    fn resize(&self, rows: u16, cols: u16) -> anyhow::Result<()> {
+    fn resize(&self, rows: u16, cols: u16) -> crate::error::Result<()> {
         *self.size.lock() = (rows, cols);
         self.sender.resize(rows, cols)?;
         self.parser.lock().screen_mut().set_size(rows, cols);
@@ -495,7 +495,7 @@ impl RemotePty {
 
     /// Kill the child in the daemon. The session stays (as exited) until the
     /// frontend removes it, so a killed tab can still show its final screen.
-    fn kill(&mut self) -> anyhow::Result<()> {
+    fn kill(&mut self) -> crate::error::Result<()> {
         self.sender.kill()?;
         Ok(())
     }
@@ -658,7 +658,7 @@ impl PtySession {
         cli_agent_sock: Option<std::path::PathBuf>,
         sidecar: Option<SidecarConfig>,
         output_signal: Option<PtyOutputSignal>,
-    ) -> anyhow::Result<Self> {
+    ) -> crate::error::Result<Self> {
         let local = LocalPty::spawn(
             worktree_path,
             rows,
@@ -705,7 +705,7 @@ impl PtySession {
         }
     }
 
-    pub fn write(&self, data: &[u8]) -> anyhow::Result<()> {
+    pub fn write(&self, data: &[u8]) -> crate::error::Result<()> {
         match self {
             PtySession::Local(l) => l.write(data),
             PtySession::Remote(r) => r.write(data),
@@ -726,14 +726,14 @@ impl PtySession {
         }
     }
 
-    pub fn resize(&self, rows: u16, cols: u16) -> anyhow::Result<()> {
+    pub fn resize(&self, rows: u16, cols: u16) -> crate::error::Result<()> {
         match self {
             PtySession::Local(l) => l.resize(rows, cols),
             PtySession::Remote(r) => r.resize(rows, cols),
         }
     }
 
-    pub fn kill(&mut self) -> anyhow::Result<()> {
+    pub fn kill(&mut self) -> crate::error::Result<()> {
         match self {
             PtySession::Local(l) => l.kill(),
             PtySession::Remote(r) => r.kill(),

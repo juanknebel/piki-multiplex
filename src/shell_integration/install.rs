@@ -50,7 +50,7 @@ pub struct IntegrationSetup {
 /// `base_dir` should be a stable per-user location (e.g. `<data_dir>/shell_integration`).
 /// Returns `None` for unsupported shells; callers spawn those without
 /// integration.
-pub fn setup_for(shell_path: &str, base_dir: &Path) -> std::io::Result<Option<IntegrationSetup>> {
+pub fn setup_for(shell_path: &str, base_dir: &Path) -> crate::error::Result<Option<IntegrationSetup>> {
     let Some(family) = ShellFamily::detect(shell_path) else {
         return Ok(None);
     };
@@ -90,7 +90,7 @@ pub fn setup_for(shell_path: &str, base_dir: &Path) -> std::io::Result<Option<In
     Ok(Some(setup))
 }
 
-fn materialize(base_dir: &Path, family: ShellFamily) -> std::io::Result<()> {
+fn materialize(base_dir: &Path, family: ShellFamily) -> crate::error::Result<()> {
     std::fs::create_dir_all(base_dir)?;
     match family {
         ShellFamily::Zsh => {
@@ -128,7 +128,7 @@ fn materialize(base_dir: &Path, family: ShellFamily) -> std::io::Result<()> {
     Ok(())
 }
 
-fn atomic_write(path: &std::path::Path, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
+fn atomic_write(path: &std::path::Path, contents: impl AsRef<[u8]>) -> crate::error::Result<()> {
     // Write to a sibling temp file and rename, so a concurrent reader (or a
     // crash mid-write) never observes a partially written bridge script.
     let tmp = path.with_extension(format!("tmp.{}", std::process::id()));

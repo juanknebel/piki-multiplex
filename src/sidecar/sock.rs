@@ -65,7 +65,7 @@ pub fn spawn_reader(
     path: PathBuf,
     shell: Arc<Mutex<ShellSession>>,
     callback: Option<SidecarCallback>,
-) -> std::io::Result<SockReader> {
+) -> crate::error::Result<SockReader> {
     use std::os::unix::ffi::OsStrExt;
 
     // (Re)create the FIFO. Unlink first so a stale node from a crashed prior
@@ -77,7 +77,7 @@ pub fn spawn_reader(
     // the call; `mkfifo` only reads it.
     let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
     if rc != 0 {
-        return Err(std::io::Error::last_os_error());
+        return Err(crate::error::Error::Io(std::io::Error::last_os_error()));
     }
 
     let stop = Arc::new(AtomicBool::new(false));

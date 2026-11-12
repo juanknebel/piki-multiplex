@@ -28,7 +28,9 @@ use crate::session::protocol::{
 };
 use crate::session::restore::restore_buffer;
 use crate::shell_integration::parser::OscParser;
-use crate::shell_integration::{ShellEvent, ShellTabState, SidecarConfig};
+#[cfg(all(unix, feature = "sidecar"))]
+use crate::shell_integration::ShellEvent;
+use crate::shell_integration::{ShellTabState, SidecarConfig};
 #[cfg(all(unix, feature = "sidecar"))]
 use crate::sidecar::sock::SockReader;
 
@@ -139,7 +141,7 @@ impl Session {
     pub fn spawn(
         req: &SpawnRequest,
         sidecar: Option<SidecarConfig>,
-    ) -> anyhow::Result<Arc<Session>> {
+    ) -> crate::error::Result<Arc<Session>> {
         let pty = native_pty_system();
         let pair = pty.openpty(PtySize {
             rows: req.rows,

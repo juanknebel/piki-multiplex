@@ -19,6 +19,8 @@
 //!   [`shell_integration::parser`]. Inert unless a caller opts in by
 //!   supplying a [`shell_integration::SidecarConfig`] at spawn time.
 
+pub mod error;
+pub use error::Error;
 pub mod pty;
 pub mod session;
 pub mod shell_integration;
