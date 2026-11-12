@@ -211,9 +211,13 @@ impl ShellTabState {
     /// [`apply_sidecar_event`](Self::apply_sidecar_event) (e.g. passive
     /// status detection reading a provider's own title/screen text). `None`
     /// without a factory configured.
-    pub fn sidecar_or_insert(&mut self) -> Option<&mut Box<dyn SidecarState>> {
+    pub fn sidecar_or_insert(&mut self) -> Option<&mut dyn SidecarState> {
         let factory = self.sidecar_factory.as_ref()?;
-        Some(self.sidecar.get_or_insert_with(|| factory()))
+        self.sidecar.get_or_insert_with(|| factory());
+        match self.sidecar.as_mut() {
+            Some(b) => Some(b.as_mut()),
+            None => None,
+        }
     }
 
     pub fn apply_sidecar_event(&mut self, json: serde_json::Value) {
