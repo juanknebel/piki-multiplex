@@ -96,7 +96,7 @@ fn materialize(base_dir: &Path, family: ShellFamily) -> std::io::Result<()> {
         ShellFamily::Zsh => {
             let bridge = zsh_bridge_dir(base_dir);
             std::fs::create_dir_all(&bridge)?;
-            std::fs::write(bridge.join("integration.zsh"), SCRIPT_ZSH)?;
+            atomic_write(&bridge.join("integration.zsh"), SCRIPT_ZSH)?;
             // Bridge .zshrc: source our script then chain to user's real one.
             // ZDOTDIR override means zsh would otherwise *not* read ~/.zshrc.
             let bridge_zshrc = "# piki-multi shell-integration bridge — auto-generated, do not edit.\n\
@@ -104,10 +104,10 @@ fn materialize(base_dir: &Path, family: ShellFamily) -> std::io::Result<()> {
                  if [ -f \"$HOME/.zshrc\" ]; then\n\
                  \x20\x20ZDOTDIR=\"$HOME\" source \"$HOME/.zshrc\"\n\
                  fi\n";
-            std::fs::write(bridge.join(".zshrc"), bridge_zshrc)?;
+            atomic_write(&bridge.join(".zshrc"), bridge_zshrc)?;
         }
         ShellFamily::Bash => {
-            std::fs::write(base_dir.join("integration.bash"), SCRIPT_BASH)?;
+            atomic_write(&base_dir.join("integration.bash"), SCRIPT_BASH)?;
             let bridge = bash_bridge_path(base_dir);
             let bridge_rc = format!(
                 "# piki-multi shell-integration bridge — auto-generated, do not edit.\n\
@@ -117,14 +117,23 @@ fn materialize(base_dir: &Path, family: ShellFamily) -> std::io::Result<()> {
                  fi\n",
                 base_dir.display()
             );
-            std::fs::write(&bridge, bridge_rc)?;
+            atomic_write(&bridge, bridge_rc)?;
         }
         ShellFamily::Fish => {
             // No bridge file needed — fish's `-C 'source <path>'` runs after
             // config.fish already sourced the user's setup.
-            std::fs::write(fish_integration_path(base_dir), SCRIPT_FISH)?;
+            atomic_write(&fish_integration_path(base_dir), SCRIPT_FISH)?;
         }
     }
+    Ok(())
+}
+
+fn atomic_write(path: &std::path::Path, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
+    // Write to a sibling temp file and rename, so a concurrent reader (or a
+    // crash mid-write) never observes a partially written bridge script.
+    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    std::fs::write(&tmp, contents)?;
+    std::fs::rename(&tmp, path)?;
     Ok(())
 }
 
