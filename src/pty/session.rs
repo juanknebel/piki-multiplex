@@ -316,7 +316,7 @@ impl LocalPty {
     ///
     /// Errors only if the writer thread has already exited, which happens
     /// after the first failed write (the child closed its side).
-    pub fn write(&mut self, data: &[u8]) -> anyhow::Result<()> {
+    pub fn write(&self, data: &[u8]) -> anyhow::Result<()> {
         self.writer_tx
             .send(data.to_vec())
             .map_err(|_| anyhow::anyhow!("PTY writer thread has exited"))
@@ -470,7 +470,7 @@ impl RemotePty {
         }
     }
 
-    fn write(&mut self, data: &[u8]) -> anyhow::Result<()> {
+    fn write(&self, data: &[u8]) -> anyhow::Result<()> {
         self.sender.input(data)?;
         Ok(())
     }
@@ -701,7 +701,7 @@ impl PtySession {
         }
     }
 
-    pub fn write(&mut self, data: &[u8]) -> anyhow::Result<()> {
+    pub fn write(&self, data: &[u8]) -> anyhow::Result<()> {
         match self {
             PtySession::Local(l) => l.write(data),
             PtySession::Remote(r) => r.write(data),
