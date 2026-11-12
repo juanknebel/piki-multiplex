@@ -125,7 +125,7 @@ fn run(
     let fd = unsafe {
         libc::open(
             c_path.as_ptr(),
-            libc::O_RDWR | libc::O_NONBLOCK | libc::O_CLOEXEC,
+            libc::O_RDWR | libc::O_NONBLOCK | libc::O_CLOEXEC | libc::O_NOFOLLOW,
         )
     };
     if fd < 0 {
