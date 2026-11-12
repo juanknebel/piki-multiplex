@@ -47,6 +47,8 @@ pub struct Server {
     /// channel (OSC 777 and the FIFO transport) is inert for every session
     /// this daemon spawns.
     sidecar: Option<SidecarConfig>,
+    /// How long the daemon stays up with no sessions left before exiting.
+    idle_exit: Duration,
 }
 
 impl Server {
@@ -55,12 +57,20 @@ impl Server {
     }
 
     pub fn with_sidecar(sidecar: Option<SidecarConfig>) -> Arc<Server> {
+        Self::with_idle_exit(sidecar, idle_exit_from_env())
+    }
+
+    /// Like [`Self::with_sidecar`] but with an explicit idle-exit timeout.
+    /// `PIKI_SESSION_IDLE_SECS` is honored by [`Self::with_sidecar`]; pass
+    /// [`IDLE_EXIT`] (or any value) here to override it deterministically.
+    pub fn with_idle_exit(sidecar: Option<SidecarConfig>, idle_exit: Duration) -> Arc<Server> {
         Arc::new(Server {
             sessions: Mutex::new(HashMap::new()),
             shutdown: Arc::new(AtomicBool::new(false)),
             idle_since: Mutex::new(Some(Instant::now())),
             pid: std::process::id(),
             sidecar,
+            idle_exit,
         })
     }
 
@@ -420,7 +430,7 @@ impl Server {
         if self.is_idle() {
             let mut idle_since = self.idle_since.lock().unwrap();
             let since = idle_since.get_or_insert_with(Instant::now);
-            if since.elapsed() >= IDLE_EXIT {
+            if since.elapsed() >= self.idle_exit {
                 tracing::info!("session daemon idle; shutting down");
                 self.request_shutdown();
             }
@@ -552,4 +562,16 @@ mod tests {
         server.sessions.lock().unwrap().remove("pins-daemon");
         assert!(server.is_idle(), "no sessions left means idle");
     }
+}
+
+
+/// Resolve the idle-exit timeout, honoring `PIKI_SESSION_IDLE_SECS` (seconds)
+/// when set to a positive integer, otherwise [`IDLE_EXIT`].
+fn idle_exit_from_env() -> Duration {
+    std::env::var("PIKI_SESSION_IDLE_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(IDLE_EXIT)
 }
