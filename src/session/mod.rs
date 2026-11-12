@@ -11,6 +11,7 @@
 //!   when the path overflows `sun_path` (internal).
 
 pub mod client;
+#[cfg(feature = "daemon")]
 pub mod daemon;
 pub mod protocol;
 pub mod restore;

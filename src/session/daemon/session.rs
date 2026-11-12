@@ -29,6 +29,7 @@ use crate::session::protocol::{
 use crate::session::restore::restore_buffer;
 use crate::shell_integration::parser::OscParser;
 use crate::shell_integration::{ShellEvent, ShellTabState, SidecarConfig};
+#[cfg(all(unix, feature = "sidecar"))]
 use crate::sidecar::sock::SockReader;
 
 /// Depth of a client's outbound queue. A client that falls this far behind is
@@ -116,6 +117,7 @@ pub struct Session {
     reader: OnceLock<thread::JoinHandle<()>>,
     /// FIFO reader for the sidecar channel; its `Drop` unlinks the FIFO.
     /// `None` unless this session has one.
+    #[cfg(all(unix, feature = "sidecar"))]
     cli_agent_sock: Mutex<Option<SockReader>>,
     /// How this daemon interprets its sessions' sidecar channel, if the
     /// embedding application wired one up.
@@ -193,15 +195,13 @@ impl Session {
             writer: Mutex::new(writer),
             exit: Exit::default(),
             reader: OnceLock::new(),
+            #[cfg(all(unix, feature = "sidecar"))]
             cli_agent_sock: Mutex::new(None),
             sidecar,
         });
 
-        // Out-of-band sidecar FIFO. Its callback fans the decoded JSON event
-        // to attached clients immediately (an idle agent produces no PTY
-        // bytes, so the reader thread can't do it), then clears the
-        // `pending_events` the sock reader appends so it never grows. Failure
-        // degrades to OSC-777-only status; it never fails the spawn.
+        #[cfg(all(unix, feature = "sidecar"))]
+        // Out-of-band sidecar FIFO...
         if let (Some(sock_path), Some(shell)) = (&req.cli_agent_sock, session.shell.as_ref()) {
             let weak = Arc::downgrade(&session);
             let cb: crate::sidecar::sock::SidecarCallback = Box::new(move |ev| {
@@ -495,6 +495,7 @@ impl Drop for Session {
         let _ = self.killer.lock().kill();
         // The reader exits on its own when the master closes; the FIFO reader
         // unlinks its socket on drop.
+        #[cfg(all(unix, feature = "sidecar"))]
         let _ = self.cli_agent_sock.lock().take();
     }
 }

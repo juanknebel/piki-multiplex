@@ -83,7 +83,7 @@ pub struct LocalPty {
     /// spawned with both a `cli_agent_sock` path and a [`SidecarConfig`]
     /// (e.g. Claude tabs, and shell tabs so a manually-run `claude` can
     /// report too). Its `Drop` stops the reader and unlinks the FIFO.
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "sidecar"))]
     _cli_agent_sock: Option<crate::sidecar::sock::SockReader>,
 }
 
@@ -264,7 +264,7 @@ impl LocalPty {
         // Out-of-band FIFO transport for the structured cli-agent channel.
         // Only meaningful when shell integration is on (so `shell` is `Some`)
         // and a per-spawn FIFO path was supplied (Claude tabs).
-        #[cfg(unix)]
+        #[cfg(all(unix, feature = "sidecar"))]
         let cli_agent_sock = match (cli_agent_sock, shell.as_ref()) {
             (Some(path), Some(shell)) => {
                 match crate::sidecar::sock::spawn_reader(path, Arc::clone(shell), None) {
@@ -277,7 +277,7 @@ impl LocalPty {
             }
             _ => None,
         };
-        #[cfg(not(unix))]
+        #[cfg(not(all(unix, feature = "sidecar")))]
         let _ = cli_agent_sock;
 
         tracing::info!(command = command, path = %worktree_path.display(), rows, cols, shell_integration = enable_shell_integration, "PTY spawned");
@@ -290,7 +290,7 @@ impl LocalPty {
             master: pair.master,
             bytes_processed,
             shell,
-            #[cfg(unix)]
+            #[cfg(all(unix, feature = "sidecar"))]
             _cli_agent_sock: cli_agent_sock,
         })
     }

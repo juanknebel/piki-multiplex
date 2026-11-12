@@ -17,7 +17,9 @@
 
 use std::ffi::OsStr;
 use std::io;
-use std::os::unix::net::{UnixListener, UnixStream};
+#[cfg(feature = "daemon")]
+use std::os::unix::net::UnixListener;
+use std::os::unix::net::UnixStream;
 use std::path::Path;
 
 /// Longest socket path we hand straight to `bind()`/`connect()`. Kept under the
@@ -45,6 +47,7 @@ fn split(path: &Path) -> io::Result<(&Path, &OsStr)> {
 ///
 /// MUST be called before the process spawns any thread: the overflow path
 /// mutates the process-global cwd.
+#[cfg(feature = "daemon")]
 pub(crate) fn bind_listener(path: &Path) -> io::Result<UnixListener> {
     if fits(path) {
         return UnixListener::bind(path);

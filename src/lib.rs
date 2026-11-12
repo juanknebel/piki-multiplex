@@ -22,4 +22,5 @@
 pub mod pty;
 pub mod session;
 pub mod shell_integration;
+#[cfg(feature = "sidecar")]
 pub mod sidecar;

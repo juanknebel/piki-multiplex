@@ -339,7 +339,7 @@ pub fn ensure_daemon(socket: &Path, launch: impl FnOnce() -> io::Result<()>) -> 
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "daemon"))]
 mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;

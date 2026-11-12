@@ -15,6 +15,11 @@ description = "Terminal multiplexer engine: PTY spawning, vt100 terminal state, 
 [patch.crates-io]
 vt100 = { git = "https://github.com/juanknebel/piki-vt100", branch = "main" }
 
+[features]
+default = ["daemon", "sidecar"]
+daemon = []
+sidecar = []
+
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "sync", "fs"] }
