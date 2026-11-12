@@ -246,7 +246,10 @@ impl LocalPty {
                             }
                         }
                     }
-                    Err(_) => break,
+                    Err(e) => {
+                        tracing::debug!(error = %e, "PTY reader: read failed");
+                        break;
+                    }
                 }
             }
             // Flush remaining bytes
@@ -615,7 +618,8 @@ fn remote_reader_loop(
                 break;
             }
             Ok(_) => {} // heartbeat and unexpected frames
-            Err(_) => {
+            Err(e) => {
+                tracing::debug!(error = %e, "remote PTY reader: connection lost");
                 // Daemon gone or connection dropped → the tab is dead.
                 alive.store(false, Ordering::Relaxed);
                 if let Some(sig) = output_signal {
