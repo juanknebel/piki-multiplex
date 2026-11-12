@@ -589,6 +589,24 @@ mod tests {
     }
 
     #[test]
+    fn arbitrary_bytes_do_not_panic() {
+        // A smoke test standing in for fuzzing: feed a soup of control bytes,
+        // partial OSC sequences and random printable data in odd chunk sizes.
+        let data: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
+        for chunk_size in [1, 2, 3, 7, 13, 100] {
+            let mut p = OscParser::new();
+            for chunk in data.chunks(chunk_size) {
+                let _ = p.feed(chunk);
+            }
+            // And with a sidecar target configured.
+            let mut p = OscParser::with_sidecar_target(Some("t://x".to_string()));
+            for chunk in data.chunks(chunk_size) {
+                let _ = p.feed(chunk);
+            }
+        }
+    }
+
+    #[test]
     fn unterminated_osc_does_not_grow_unbounded() {
         let mut p = OscParser::new();
         // 9 KB of garbage inside an unterminated OSC.
