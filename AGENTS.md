@@ -141,3 +141,16 @@ crate must not depend on.
   `session::protocol::PROTOCOL_VERSION` only for a genuinely breaking change.
 - vt100 is patched to `juanknebel/piki-vt100`; consumers must apply the same
   `[patch.crates-io]` in their root manifest.
+
+## Release process
+
+Run `scripts/release.sh <new-version>` (e.g. `0.2.0`). It:
+
+1. Verifies clean tree, `main` up to date, tag not existing.
+2. Runs fmt/clippy/tests.
+3. Bumps `version` in `Cargo.toml`, refreshes `Cargo.lock`.
+4. Commits `chore: release vX.Y.Z` and creates annotated tag `vX.Y.Z`.
+5. Pushes commit and tag; the `release.yml` workflow then verifies and
+   creates the GitHub Release.
+
+Update `CHANGELOG.md` before running the script.
