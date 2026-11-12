@@ -85,3 +85,10 @@ piki-multiplex = { git = "https://github.com/juanknebel/piki-multiplex", branch 
 ```
 
 Linux/macOS only (the daemon uses `fork`/`setsid`/Unix sockets/FIFOs).
+
+## Environment variables
+
+- `PIKI_SESSION_LOG` — daemon log level (`trace`, `debug`, `info`, `warn`,
+  `error`, `off`; default `info`).
+- `PIKI_SESSION_IDLE_SECS` — seconds the daemon stays alive with no sessions
+  left before exiting on its own (default `60`).
