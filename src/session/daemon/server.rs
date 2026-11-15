@@ -347,12 +347,24 @@ impl Server {
         loop {
             match read_frame(&mut read_stream) {
                 Ok(Frame::Input(b)) => {
-                    let _ = session.write_input(&b);
+                    // A client overrunning the writer queue is detached;
+                    // other write errors (child gone) are ignored so the
+                    // client keeps its final screen.
+                    if let Err(e) = session.write_input(&b)
+                        && e.kind() == std::io::ErrorKind::QuotaExceeded
+                    {
+                        break;
+                    }
                 }
                 Ok(Frame::Answerback(b)) => {
                     // Terminal-query relay: only the designated answerer
                     // (most recently attached client) reaches the PTY.
-                    let _ = session.write_answerback(client_id, &b);
+                    // Same quota policy as input: floods detach the sender.
+                    if let Err(e) = session.write_answerback(client_id, &b)
+                        && e.kind() == std::io::ErrorKind::QuotaExceeded
+                    {
+                        break;
+                    }
                 }
                 Ok(Frame::Resize { rows, cols }) => session.resize(rows, cols),
                 Ok(Frame::Resync) => {

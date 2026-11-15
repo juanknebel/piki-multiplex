@@ -15,7 +15,10 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError};
-use std::sync::{Arc, OnceLock};
+use std::sync::{
+    Arc, OnceLock,
+    atomic::{AtomicU64, Ordering},
+};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -38,6 +41,12 @@ use crate::sidecar::sock::SockReader;
 /// dropped (its terminal is a lost cause anyway) rather than back-pressuring
 /// the PTY reader, which every other client shares.
 const CLIENT_QUEUE_DEPTH: usize = 512;
+
+/// Cap on bytes queued (not yet written) for a session's writer thread.
+/// Past this, writes are rejected and the sending client is detached (see
+/// `run_attach`): input floods must not grow daemon memory without bound.
+/// Sized so legitimate bursts (multi-MB pastes) fit with room to spare.
+const WRITER_QUEUE_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Scrollback the daemon keeps per session for restore buffers.
 const DAEMON_SCROLLBACK: usize = 5000;
@@ -118,6 +127,9 @@ pub struct Session {
     /// queue, so neither attach threads nor the reader thread ever blocks on
     /// a full PTY input queue (mirrors `LocalPty`'s writer thread).
     writer_tx: Sender<Vec<u8>>,
+    /// Bytes currently reserved in `writer_tx` (queued + in-flight in the
+    /// writer thread). Bounded by [`WRITER_QUEUE_BYTES`].
+    writer_queued: AtomicU64,
     exit: Exit,
     reader: OnceLock<thread::JoinHandle<()>>,
     /// FIFO reader for the sidecar channel; its `Drop` unlinks the FIFO.
@@ -167,25 +179,10 @@ impl Session {
 
         let mut reader = pair.master.try_clone_reader()?;
         let writer = pair.master.take_writer()?;
-        // A dedicated writer thread drains this queue: a direct write(2) on
-        // the master blocks once the kernel's PTY input queue fills. The
-        // thread exits when the session drops its sender, or on the first
-        // write error (the child closed its side).
+        // Queued writes drain on a dedicated thread (spawned below, once the
+        // Session exists to share its queue counter): a direct write(2) on
+        // the master blocks once the kernel's PTY input queue fills.
         let (writer_tx, writer_rx) = std::sync::mpsc::channel::<Vec<u8>>();
-        thread::Builder::new()
-            .name(format!("session-writer({})", req.id))
-            .spawn(move || {
-                let mut writer = writer;
-                for chunk in writer_rx {
-                    if writer
-                        .write_all(&chunk)
-                        .and_then(|_| writer.flush())
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            })?;
 
         let shell = req.integration_on.then(|| {
             let state = match sidecar.as_ref() {
@@ -217,6 +214,7 @@ impl Session {
             killer: Mutex::new(killer),
             master: Mutex::new(pair.master),
             writer_tx,
+            writer_queued: AtomicU64::new(0),
             exit: Exit::default(),
             reader: OnceLock::new(),
             #[cfg(all(unix, feature = "sidecar"))]
@@ -247,6 +245,27 @@ impl Session {
                 }
             }
         }
+
+        // The writer thread: drains `writer_tx` and pays back `writer_queued`
+        // per chunk. Exits when the session drops its sender, or on the first
+        // write error (the child closed its side).
+        let writer_session = Arc::clone(&session);
+        thread::Builder::new()
+            .name(format!("session-writer({})", session.id))
+            .spawn(move || {
+                let mut writer = writer;
+                for chunk in writer_rx {
+                    let done = writer.write_all(&chunk).and_then(|_| writer.flush());
+                    // Release the reservation whether the write succeeded or
+                    // not: the bytes left the queue either way.
+                    writer_session
+                        .writer_queued
+                        .fetch_sub(chunk.len() as u64, Ordering::Relaxed);
+                    if done.is_err() {
+                        break;
+                    }
+                }
+            })?;
 
         let reader_session = Arc::clone(&session);
         let handle = thread::Builder::new()
@@ -398,15 +417,38 @@ impl Session {
     /// Never blocks: bytes are queued for the session's writer thread. A
     /// direct `write(2)` on the master blocks once the kernel's PTY input
     /// queue fills, which would stall the calling attach thread — or wedge
-    /// the reader thread itself on an answerback write. Errors only if the
-    /// writer thread has already exited.
+    /// the reader thread itself on an answerback write. Errors if the writer
+    /// thread has already exited, or with `QuotaExceeded` once
+    /// `WRITER_QUEUE_BYTES` are already queued.
     pub fn write_input(&self, data: &[u8]) -> std::io::Result<()> {
-        self.writer_tx.send(data.to_vec()).map_err(|_| {
-            std::io::Error::new(
+        // Reserve queue space first so a flooding client is rejected instead
+        // of growing daemon memory without bound. `>` (not `>=`) so a lone
+        // maximum-size frame always fits.
+        let len = data.len() as u64;
+        loop {
+            let queued = self.writer_queued.load(Ordering::Relaxed);
+            if queued.saturating_add(len) > WRITER_QUEUE_BYTES {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::QuotaExceeded,
+                    "PTY writer queue full",
+                ));
+            }
+            if self
+                .writer_queued
+                .compare_exchange_weak(queued, queued + len, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                break;
+            }
+        }
+        if self.writer_tx.send(data.to_vec()).is_err() {
+            self.writer_queued.fetch_sub(len, Ordering::Relaxed);
+            return Err(std::io::Error::new(
                 std::io::ErrorKind::BrokenPipe,
                 "PTY writer thread has exited",
-            )
-        })
+            ));
+        }
+        Ok(())
     }
 
     /// Forward a client's terminal-query relay to the child's stdin — but
@@ -566,6 +608,52 @@ mod tests {
         assert!(
             start.elapsed() < Duration::from_secs(1),
             "write_input blocked for {:?}",
+            start.elapsed()
+        );
+
+        session.kill();
+    }
+
+    /// Flooding input past the queue cap is rejected (fast) instead of
+    /// growing memory: `sleep` never drains, so the writer thread wedges on
+    /// its first chunk and every reservation sticks.
+    #[test]
+    fn write_input_rejects_flood_past_queue_cap() {
+        let session = Session::spawn(
+            &SpawnRequest {
+                id: "quota-test".into(),
+                command: "sleep".into(),
+                args: vec!["30".into()],
+                cwd: std::env::temp_dir(),
+                env: vec![(
+                    "PATH".into(),
+                    std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into()),
+                )],
+                rows: 24,
+                cols: 80,
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+
+        let chunk = vec![b'x'; 1024 * 1024];
+        let start = Instant::now();
+        let mut rejected = false;
+        for _ in 0..32 {
+            match session.write_input(&chunk) {
+                Err(e) if e.kind() == std::io::ErrorKind::QuotaExceeded => {
+                    rejected = true;
+                    break;
+                }
+                Ok(()) => {}
+                Err(e) => panic!("unexpected write error: {e}"),
+            }
+        }
+        assert!(rejected, "flood should hit the queue cap");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "quota rejection took {:?}",
             start.elapsed()
         );
 

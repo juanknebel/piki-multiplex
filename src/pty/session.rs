@@ -191,6 +191,11 @@ pub struct LocalPty {
 ///
 /// The thread exits when every sender is dropped (session + reader thread
 /// gone) or on the first write error (child closed the slave side).
+///
+/// The queue is deliberately unbounded: the only producer is the local caller
+/// (keystrokes/pastes), so a deep queue is transient and self-inflicted —
+/// bounding it would corrupt pastes or fail UI writes. (The daemon's shared
+/// `Session` instead byte-caps its queue and detaches flooding clients.)
 fn spawn_writer_thread(
     mut writer: Box<dyn Write + Send>,
 ) -> crate::error::Result<std::sync::mpsc::Sender<Vec<u8>>> {

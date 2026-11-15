@@ -20,6 +20,9 @@ Format loosely follows Keep a Changelog.
 - Daemon `Server` state moved from `std::sync::Mutex` to
   `parking_lot::Mutex`: a panicked worker can no longer poison a lock and
   crash the daemon on the next access.
+- Daemon `Session` writer queue is byte-capped (`WRITER_QUEUE_BYTES`): input
+  floods are rejected and the sending client detached instead of growing
+  daemon memory without bound.
 
 ## [0.2.0] - 2026-11-11
 ### Added

@@ -199,7 +199,8 @@ long-lived duplex stream (`Input`/`Answerback`/`Resize`/`Resync`/`Detach`/
 `Kill` up, `Output`/`Restore`/`ShellState`/`ShellEvent`/`Exited`/
 `Heartbeat` down). Drive it from a dedicated reader thread (see `RemotePty`).
 Writes never block: input and answerbacks queue for a per-session writer
-thread, even when the child stops reading stdin.
+thread, even when the child stops reading stdin. The queue is byte-capped —
+a client flooding input is detached rather than growing daemon memory.
 
 Helpers: `new_session_id()` mints a process-unique id; `sessions_enabled(
 config_path)` is a minimal `[sessions].enabled` TOML lookup (default `true`
