@@ -4,6 +4,10 @@ All notable changes to this project are documented here.
 Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
+### Added
+- `pty::SpawnOptions` builder with `PtySession::spawn_with` /
+  `LocalPty::spawn_with` as the preferred spawn API; the 11-argument `spawn`
+  is kept and delegates to it.
 
 ## [0.2.0] - 2026-11-11
 ### Added

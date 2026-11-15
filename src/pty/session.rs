@@ -1,6 +1,6 @@
 use parking_lot::Mutex;
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -64,6 +64,106 @@ impl PtyOutputSignal {
     }
 }
 
+/// Options for spawning a PTY session: [`SpawnOptions::new`] plus the `with_*`
+/// setters, then [`LocalPty::spawn_with`] / [`PtySession::spawn_with`].
+///
+/// Paths, args and env are borrowed so the common case — forwarding values
+/// the caller already holds — allocates nothing.
+#[derive(Clone)]
+pub struct SpawnOptions<'a> {
+    worktree_path: &'a Path,
+    rows: u16,
+    cols: u16,
+    command: &'a str,
+    args: &'a [String],
+    extra_env: &'a [(String, String)],
+    extra_args: &'a [String],
+    enable_shell_integration: bool,
+    cli_agent_sock: Option<PathBuf>,
+    sidecar: Option<SidecarConfig>,
+    output_signal: Option<PtyOutputSignal>,
+}
+
+impl<'a> SpawnOptions<'a> {
+    /// Minimal options: run `command` in `worktree_path` at 24×80, with no
+    /// args, no extra env, and shell integration off.
+    pub fn new(worktree_path: &'a Path, command: &'a str) -> Self {
+        Self {
+            worktree_path,
+            rows: 24,
+            cols: 80,
+            command,
+            args: &[],
+            extra_env: &[],
+            extra_args: &[],
+            enable_shell_integration: false,
+            cli_agent_sock: None,
+            sidecar: None,
+            output_signal: None,
+        }
+    }
+
+    /// Terminal size (default 24×80).
+    pub fn with_size(mut self, rows: u16, cols: u16) -> Self {
+        self.rows = rows;
+        self.cols = cols;
+        self
+    }
+
+    /// Args for the child (default none). Run after
+    /// [`with_extra_args`](Self::with_extra_args).
+    pub fn with_args(mut self, args: &'a [String]) -> Self {
+        self.args = args;
+        self
+    }
+
+    /// Env vars merged into the child environment after the inherited ones,
+    /// so callers can override defaults (default none).
+    pub fn with_extra_env(mut self, extra_env: &'a [(String, String)]) -> Self {
+        self.extra_env = extra_env;
+        self
+    }
+
+    /// Args prepended to [`with_args`](Self::with_args) — useful for
+    /// `bash --rcfile <bridge>`, where the rcfile flag must come before any
+    /// user-supplied args (default none).
+    pub fn with_extra_args(mut self, extra_args: &'a [String]) -> Self {
+        self.extra_args = extra_args;
+        self
+    }
+
+    /// Spin up an OSC parser that observes the byte stream and updates the
+    /// per-tab [`ShellTabState`]
+    /// (default off).
+    pub fn with_shell_integration(mut self, enable: bool) -> Self {
+        self.enable_shell_integration = enable;
+        self
+    }
+
+    /// Per-spawn FIFO path an out-of-band emitter writes structured events
+    /// to. Only meaningful together with shell integration and
+    /// [`with_sidecar`](Self::with_sidecar), which gives the events meaning.
+    pub fn with_cli_agent_sock(mut self, path: PathBuf) -> Self {
+        self.cli_agent_sock = Some(path);
+        self
+    }
+
+    /// Which OSC 777 target to claim and how to interpret its JSON (default
+    /// none, leaving OSC 777 and the FIFO transport inert).
+    pub fn with_sidecar(mut self, sidecar: SidecarConfig) -> Self {
+        self.sidecar = Some(sidecar);
+        self
+    }
+
+    /// Usually one shared instance per frontend, raised by the reader thread
+    /// after each parser flush so an event loop can sleep until output
+    /// actually arrives instead of polling byte counters.
+    pub fn with_output_signal(mut self, signal: PtyOutputSignal) -> Self {
+        self.output_signal = Some(signal);
+        self
+    }
+}
+
 /// A PTY session owned in this process (the classic path). Backs
 /// [`PtySession::Local`].
 pub struct LocalPty {
@@ -109,40 +209,26 @@ fn spawn_writer_thread(
 }
 
 impl LocalPty {
-    /// Spawn an AI assistant in a PTY inside the given worktree directory.
+    /// Spawn a child process in a PTY inside the given worktree directory.
     ///
-    /// `extra_env` is merged into the child environment after the inherited
-    /// vars (so callers can override defaults). `extra_args` is prepended to
-    /// `args` — useful for `bash --rcfile <bridge>` where the rcfile flag
-    /// must come before any user-supplied args. Pass `enable_shell_integration =
-    /// true` to spin up an OSC parser that observes the byte stream and
-    /// updates the per-tab [`ShellTabState`].
-    ///
-    /// `cli_agent_sock` (when `Some` *and* `enable_shell_integration`) is the
-    /// per-spawn FIFO path an out-of-band emitter writes structured events
-    /// to; we start a reader that feeds the same [`ShellSession`] the OSC
-    /// parser feeds (the in-band OSC 777 path stays as a fallback). Both
-    /// paths are inert unless `sidecar` is also `Some` — it supplies the OSC
-    /// 777 target to claim and the factory that gives the decoded JSON
-    /// meaning.
-    ///
-    /// `output_signal` (usually one shared instance per frontend) is raised by
-    /// the reader thread after each parser flush, so an event loop can sleep
-    /// until output actually arrives instead of polling byte counters.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn spawn(
-        worktree_path: &Path,
-        rows: u16,
-        cols: u16,
-        command: &str,
-        args: &[String],
-        extra_env: &[(String, String)],
-        extra_args: &[String],
-        enable_shell_integration: bool,
-        cli_agent_sock: Option<std::path::PathBuf>,
-        sidecar: Option<SidecarConfig>,
-        output_signal: Option<PtyOutputSignal>,
-    ) -> crate::error::Result<Self> {
+    /// This is the preferred spawn entry point: options are built with
+    /// [`SpawnOptions::new`] plus the `with_*` setters (see each setter for
+    /// what it means). The older [`spawn`](Self::spawn) takes the same inputs
+    /// positionally and delegates here.
+    pub async fn spawn_with(options: SpawnOptions<'_>) -> crate::error::Result<Self> {
+        let SpawnOptions {
+            worktree_path,
+            rows,
+            cols,
+            command,
+            args,
+            extra_env,
+            extra_args,
+            enable_shell_integration,
+            cli_agent_sock,
+            sidecar,
+            output_signal,
+        } = options;
         let pty_system = native_pty_system();
 
         let size = PtySize {
@@ -296,6 +382,39 @@ impl LocalPty {
             #[cfg(all(unix, feature = "sidecar"))]
             _cli_agent_sock: cli_agent_sock,
         })
+    }
+
+    /// Positional-argument form of [`spawn_with`](Self::spawn_with); kept so
+    /// existing callers keep compiling, delegates unchanged. New code should
+    /// use [`SpawnOptions`] + `spawn_with`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn spawn(
+        worktree_path: &Path,
+        rows: u16,
+        cols: u16,
+        command: &str,
+        args: &[String],
+        extra_env: &[(String, String)],
+        extra_args: &[String],
+        enable_shell_integration: bool,
+        cli_agent_sock: Option<PathBuf>,
+        sidecar: Option<SidecarConfig>,
+        output_signal: Option<PtyOutputSignal>,
+    ) -> crate::error::Result<Self> {
+        Self::spawn_with(SpawnOptions {
+            worktree_path,
+            rows,
+            cols,
+            command,
+            args,
+            extra_env,
+            extra_args,
+            enable_shell_integration,
+            cli_agent_sock,
+            sidecar,
+            output_signal,
+        })
+        .await
     }
 
     /// Per-session shell integration state, if this session was spawned with it
@@ -644,7 +763,14 @@ pub enum PtySession {
 
 impl PtySession {
     /// Spawn a session owned by this process (the fallback path, and what the
-    /// tests use). Signature unchanged from the original struct.
+    /// tests use). Preferred over [`spawn`](Self::spawn): same inputs, named.
+    pub async fn spawn_with(options: SpawnOptions<'_>) -> crate::error::Result<Self> {
+        Ok(PtySession::Local(LocalPty::spawn_with(options).await?))
+    }
+
+    /// Positional-argument form of [`spawn_with`](Self::spawn_with); kept so
+    /// existing callers keep compiling, delegates unchanged. New code should
+    /// use [`SpawnOptions`] + `spawn_with`.
     #[allow(clippy::too_many_arguments)]
     pub async fn spawn(
         worktree_path: &Path,
@@ -655,11 +781,11 @@ impl PtySession {
         extra_env: &[(String, String)],
         extra_args: &[String],
         enable_shell_integration: bool,
-        cli_agent_sock: Option<std::path::PathBuf>,
+        cli_agent_sock: Option<PathBuf>,
         sidecar: Option<SidecarConfig>,
         output_signal: Option<PtyOutputSignal>,
     ) -> crate::error::Result<Self> {
-        let local = LocalPty::spawn(
+        Self::spawn_with(SpawnOptions {
             worktree_path,
             rows,
             cols,
@@ -671,9 +797,8 @@ impl PtySession {
             cli_agent_sock,
             sidecar,
             output_signal,
-        )
-        .await?;
-        Ok(PtySession::Local(local))
+        })
+        .await
     }
 
     /// Wrap a daemon [`Attachment`] as a remote-backed session. `sidecar_factory`
@@ -759,5 +884,48 @@ impl PtySession {
             PtySession::Local(l) => l.abort_reader(),
             PtySession::Remote(r) => r.abort_reader(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spawn_options_defaults_are_a_plain_24x80_terminal() {
+        let opts = SpawnOptions::new(Path::new("/tmp/wt"), "sh");
+        assert_eq!(opts.worktree_path, Path::new("/tmp/wt"));
+        assert_eq!(opts.command, "sh");
+        assert_eq!((opts.rows, opts.cols), (24, 80));
+        assert!(opts.args.is_empty());
+        assert!(opts.extra_env.is_empty());
+        assert!(opts.extra_args.is_empty());
+        assert!(!opts.enable_shell_integration);
+        assert!(opts.cli_agent_sock.is_none());
+        assert!(opts.sidecar.is_none());
+        assert!(opts.output_signal.is_none());
+    }
+
+    #[test]
+    fn spawn_options_setters_override_each_field() {
+        let args = [String::from("-l")];
+        let env = [(String::from("FOO"), String::from("bar"))];
+        let signal = PtyOutputSignal::new();
+        let opts = SpawnOptions::new(Path::new("/tmp/wt"), "bash")
+            .with_size(40, 120)
+            .with_args(&args)
+            .with_extra_env(&env)
+            .with_extra_args(&args)
+            .with_shell_integration(true)
+            .with_cli_agent_sock(PathBuf::from("/tmp/sock"))
+            .with_output_signal(signal);
+        assert_eq!((opts.rows, opts.cols), (40, 120));
+        assert_eq!(opts.args, args);
+        assert_eq!(opts.extra_env, env);
+        assert_eq!(opts.extra_args, args);
+        assert!(opts.enable_shell_integration);
+        assert_eq!(opts.cli_agent_sock, Some(PathBuf::from("/tmp/sock")));
+        assert!(opts.output_signal.is_some());
+        assert!(opts.sidecar.is_none());
     }
 }

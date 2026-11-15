@@ -53,23 +53,14 @@ vt100 = { git = "https://github.com/juanknebel/piki-vt100", branch = "main" }
 Spawn a shell in a PTY, send input, read the emulated screen:
 
 ```rust
-use piki_multiplex::pty::{PtyOutputSignal, PtySession};
+use piki_multiplex::pty::{PtyOutputSignal, PtySession, SpawnOptions};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let signal = PtyOutputSignal::new();
-    let mut session = PtySession::spawn(
-        std::env::current_dir()?.as_path(),
-        24,
-        80,
-        "sh",
-        &[],
-        &[],
-        &[],
-        false, // shell integration off for this minimal example
-        None,  // no sidecar FIFO
-        None,  // no SidecarConfig
-        Some(signal.clone()),
+    let mut session = PtySession::spawn_with(
+        SpawnOptions::new(std::env::current_dir()?.as_path(), "sh")
+            .with_output_signal(signal.clone()),
     )
     .await?;
 
@@ -104,7 +95,7 @@ semantics).
 
 | Type | Role |
 |---|---|
-| `PtySession::spawn(...)` | Spawn a child in this process (async ctor, sync handle afterwards). |
+| `SpawnOptions` → `spawn_with` | Spawn a child in this process: `new(path, cmd)` + `with_*` setters (async ctor, sync handle afterwards). The legacy 11-arg `spawn` delegates to it. |
 | `PtySession::from_attachment(...)` | Wrap a daemon `Attachment` as a remote-backed session. |
 | `PtyOutputSignal` | Coalesced "some PTY produced output" wakeup shared by every session of a frontend: reader threads `raise()`, the event loop awaits `notified()` then `take()`s. |
 | `ShellSession` | Per-session `{ state: ShellTabState, pending_events }`, mutated by the reader thread; consumers lock it and `drain_events()`. |
@@ -242,8 +233,10 @@ use piki_multiplex::shell_integration::install::setup_for;
 let base = data_dir.join("shell_integration");
 if let Some(setup) = setup_for("/bin/zsh", &base)? {
     let extra_env: Vec<(String, String)> = setup.env.into_iter().collect();
-    // ... pass extra_env + setup.extra_args to PtySession::spawn with
-    // enable_shell_integration = true
+    // ... then SpawnOptions::new(dir, shell)
+    // .with_extra_env(&extra_env)
+    // .with_extra_args(&setup.extra_args)
+    // .with_shell_integration(true)
 }
 # Ok::<(), piki_multiplex::Error>(())
 ```

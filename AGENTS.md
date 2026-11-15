@@ -66,8 +66,11 @@ Features: `daemon` (default), `sidecar` (default).
   once the kernel's PTY input queue fills, which would freeze the caller.
   `PtySession` is a `Local | Remote` facade (`RemotePty` backs it when
   attached to the session daemon over a Unix socket); the public API is
-  identical either way. `spawn`/`from_attachment` take an optional
-  `SidecarConfig` alongside the existing `cli_agent_sock` FIFO path.
+  identical either way. Spawns go through the `SpawnOptions` builder
+  (`new(path, cmd)` + `with_*` setters, 24×80 and integration-off defaults)
+  via `PtySession::spawn_with` / `LocalPty::spawn_with`; the legacy 11-arg
+  `spawn` delegates to it. `from_attachment` takes the matching
+  `SidecarFactory` alongside the `cli_agent_sock` FIFO path.
 - `session/` — the persistent-session daemon (design: `docs/persistent-sessions.md`
   in the workspace root). `protocol.rs` is the daemon⇄client wire format:
   `[kind u8][len u32 LE][payload]` frames, JSON for control messages, raw

@@ -1,25 +1,13 @@
 use std::time::{Duration, Instant};
 
-use piki_multiplex::pty::PtySession;
+use piki_multiplex::pty::{PtySession, SpawnOptions};
 
 #[tokio::test]
 async fn write_does_not_block_on_large_input() {
     let dir = tempfile::tempdir().unwrap();
-    let mut session = PtySession::spawn(
-        dir.path(),
-        24,
-        80,
-        "cat",
-        &[],
-        &[],
-        &[],
-        false,
-        None,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    let mut session = PtySession::spawn_with(SpawnOptions::new(dir.path(), "cat"))
+        .await
+        .unwrap();
 
     let big = vec![b'x'; 1_000_000];
     let start = Instant::now();

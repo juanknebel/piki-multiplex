@@ -1,3 +1,3 @@
 pub mod session;
 
-pub use session::{PtyOutputSignal, PtySession, ShellSession};
+pub use session::{PtyOutputSignal, PtySession, ShellSession, SpawnOptions};

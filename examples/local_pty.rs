@@ -4,23 +4,13 @@
 
 use std::time::Duration;
 
-use piki_multiplex::pty::{PtyOutputSignal, PtySession};
+use piki_multiplex::pty::{PtyOutputSignal, PtySession, SpawnOptions};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let signal = PtyOutputSignal::new();
-    let mut session = PtySession::spawn(
-        &std::env::current_dir()?,
-        24,
-        80,
-        "sh",
-        &[],
-        &[],
-        &[],
-        false, // shell integration off for this minimal example
-        None,  // no sidecar FIFO
-        None,  // no SidecarConfig
-        Some(signal.clone()),
+    let mut session = PtySession::spawn_with(
+        SpawnOptions::new(&std::env::current_dir()?, "sh").with_output_signal(signal.clone()),
     )
     .await?;
 
