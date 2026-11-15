@@ -93,7 +93,10 @@ Features: `daemon` (default), `sidecar` (default).
   `--serve-sessions` flag and passes the resulting `DaemonPaths`.
   `sessions_enabled(config_path)` is a minimal `[sessions].enabled` TOML
   lookup (default `true` on any failure) — a generic file-layer helper, not
-  tied to any app-specific settings merge.
+  tied to any app-specific settings merge. `Session` writes (input +
+  answerback) queue for a per-session writer thread, mirroring `LocalPty`;
+  `Server` state uses `parking_lot::Mutex` (a poisoned std lock would panic
+  the daemon on the next access).
 - `shell_integration/` — init scripts (zsh, bash, fish) embedded via
   `include_str!`, `OscParser` (streaming OSC 133/7 state machine, plus the
   in-band half of the sidecar channel), an `install` module that detects the

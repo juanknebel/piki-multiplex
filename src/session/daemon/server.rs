@@ -10,11 +10,13 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
-use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use parking_lot::Mutex;
 
 use crate::session::protocol::{
     Frame, Hello, PROTOCOL_VERSION, Reply, Request, read_frame, write_frame,
@@ -38,6 +40,8 @@ const IDLE_EXIT: Duration = Duration::from_secs(60);
 const REAP_INTERVAL: Duration = Duration::from_secs(30);
 
 pub struct Server {
+    // parking_lot, not std: a poisoned std mutex would panic the daemon on
+    // every later access after any worker thread panicked mid-lock.
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     shutdown: Arc<AtomicBool>,
     idle_since: Mutex<Option<Instant>>,
@@ -85,7 +89,7 @@ impl Server {
 
     /// Kill every session (used on daemon exit).
     pub fn kill_all(&self) {
-        for s in self.sessions.lock().unwrap().values() {
+        for s in self.sessions.lock().values() {
             s.kill();
         }
     }
@@ -163,13 +167,7 @@ impl Server {
         match req {
             Request::Ping => reply(&mut stream, Reply::Pong),
             Request::List => {
-                let sessions = self
-                    .sessions
-                    .lock()
-                    .unwrap()
-                    .values()
-                    .map(|s| s.info())
-                    .collect();
+                let sessions = self.sessions.lock().values().map(|s| s.info()).collect();
                 reply(&mut stream, Reply::Sessions { sessions })
             }
             Request::Spawn(sr) => {
@@ -180,7 +178,6 @@ impl Server {
                         let info = session.info();
                         self.sessions
                             .lock()
-                            .unwrap()
                             .insert(session.id.clone(), Arc::clone(&session));
                         self.mark_active();
                         if attach {
@@ -242,7 +239,7 @@ impl Server {
                 ),
             },
             Request::Remove { id } => {
-                let removed = self.sessions.lock().unwrap().remove(&id);
+                let removed = self.sessions.lock().remove(&id);
                 match removed {
                     Some(session) => {
                         session.kill();
@@ -286,7 +283,6 @@ impl Server {
                 let live = self
                     .sessions
                     .lock()
-                    .unwrap()
                     .values()
                     .filter(|s| s.is_live())
                     .count();
@@ -381,13 +377,13 @@ impl Server {
     }
 
     fn get(&self, id: &str) -> Option<Arc<Session>> {
-        self.sessions.lock().unwrap().get(id).cloned()
+        self.sessions.lock().get(id).cloned()
     }
 
     /// Reset the idle timer whenever the session/client population changes.
     fn mark_active(&self) {
         let idle = self.is_idle();
-        *self.idle_since.lock().unwrap() = idle.then(Instant::now);
+        *self.idle_since.lock() = idle.then(Instant::now);
     }
 
     /// `true` only when no sessions remain at all. A live session with
@@ -395,7 +391,7 @@ impl Server {
     /// frontend would doom every session 60s later); an exited-but-retained
     /// session pins it too, until the reaper drops it at `EXITED_TTL`.
     fn is_idle(&self) -> bool {
-        self.sessions.lock().unwrap().is_empty()
+        self.sessions.lock().is_empty()
     }
 
     fn reap_loop(self: &Arc<Self>) {
@@ -419,7 +415,7 @@ impl Server {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
         let ttl_ms = EXITED_TTL.as_millis() as u64;
-        self.sessions.lock().unwrap().retain(|_, s| {
+        self.sessions.lock().retain(|_, s| {
             match s.exited_at_unix_ms() {
                 Some(at) => now_ms.saturating_sub(at) < ttl_ms,
                 None => true, // live
@@ -428,14 +424,14 @@ impl Server {
 
         // Idle-exit: nothing to serve for IDLE_EXIT → stop the daemon.
         if self.is_idle() {
-            let mut idle_since = self.idle_since.lock().unwrap();
+            let mut idle_since = self.idle_since.lock();
             let since = idle_since.get_or_insert_with(Instant::now);
             if since.elapsed() >= self.idle_exit {
                 tracing::info!("session daemon idle; shutting down");
                 self.request_shutdown();
             }
         } else {
-            *self.idle_since.lock().unwrap() = None;
+            *self.idle_since.lock() = None;
         }
     }
 }
@@ -553,11 +549,7 @@ mod tests {
         // every surviving session.)
         let s = cat_session("pins-daemon");
         assert!(s.is_live());
-        server
-            .sessions
-            .lock()
-            .unwrap()
-            .insert(s.id.clone(), Arc::clone(&s));
+        server.sessions.lock().insert(s.id.clone(), Arc::clone(&s));
         assert!(
             !server.is_idle(),
             "a live detached session must not count as idle"
@@ -570,7 +562,7 @@ mod tests {
             "a retained exited session must not count as idle"
         );
 
-        server.sessions.lock().unwrap().remove("pins-daemon");
+        server.sessions.lock().remove("pins-daemon");
         assert!(server.is_idle(), "no sessions left means idle");
     }
 }

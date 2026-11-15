@@ -14,7 +14,7 @@
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
+use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -114,7 +114,10 @@ pub struct Session {
     child: Mutex<Box<dyn Child + Send + Sync>>,
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     master: Mutex<Box<dyn MasterPty + Send>>,
-    writer: Mutex<Box<dyn Write + Send>>,
+    /// Outbound bytes for the child. A dedicated writer thread drains this
+    /// queue, so neither attach threads nor the reader thread ever blocks on
+    /// a full PTY input queue (mirrors `LocalPty`'s writer thread).
+    writer_tx: Sender<Vec<u8>>,
     exit: Exit,
     reader: OnceLock<thread::JoinHandle<()>>,
     /// FIFO reader for the sidecar channel; its `Drop` unlinks the FIFO.
@@ -164,6 +167,25 @@ impl Session {
 
         let mut reader = pair.master.try_clone_reader()?;
         let writer = pair.master.take_writer()?;
+        // A dedicated writer thread drains this queue: a direct write(2) on
+        // the master blocks once the kernel's PTY input queue fills. The
+        // thread exits when the session drops its sender, or on the first
+        // write error (the child closed its side).
+        let (writer_tx, writer_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        thread::Builder::new()
+            .name(format!("session-writer({})", req.id))
+            .spawn(move || {
+                let mut writer = writer;
+                for chunk in writer_rx {
+                    if writer
+                        .write_all(&chunk)
+                        .and_then(|_| writer.flush())
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })?;
 
         let shell = req.integration_on.then(|| {
             let state = match sidecar.as_ref() {
@@ -194,7 +216,7 @@ impl Session {
             child: Mutex::new(child),
             killer: Mutex::new(killer),
             master: Mutex::new(pair.master),
-            writer: Mutex::new(writer),
+            writer_tx,
             exit: Exit::default(),
             reader: OnceLock::new(),
             #[cfg(all(unix, feature = "sidecar"))]
@@ -292,9 +314,9 @@ impl Session {
         };
 
         if !answerback.is_empty() {
-            let mut w = self.writer.lock();
-            let _ = w.write_all(&answerback);
-            let _ = w.flush();
+            // Queued, never written inline: this is the reader thread and it
+            // must keep draining the master (see write_input).
+            let _ = self.writer_tx.send(answerback);
         }
     }
 
@@ -372,10 +394,19 @@ impl Session {
     }
 
     /// Feed `data` to the child's stdin.
+    ///
+    /// Never blocks: bytes are queued for the session's writer thread. A
+    /// direct `write(2)` on the master blocks once the kernel's PTY input
+    /// queue fills, which would stall the calling attach thread — or wedge
+    /// the reader thread itself on an answerback write. Errors only if the
+    /// writer thread has already exited.
     pub fn write_input(&self, data: &[u8]) -> std::io::Result<()> {
-        let mut w = self.writer.lock();
-        w.write_all(data)?;
-        w.flush()
+        self.writer_tx.send(data.to_vec()).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "PTY writer thread has exited",
+            )
+        })
     }
 
     /// Forward a client's terminal-query relay to the child's stdin — but
@@ -387,9 +418,7 @@ impl Session {
         if self.output.lock().answerer != Some(client_id) {
             return Ok(());
         }
-        let mut w = self.writer.lock();
-        w.write_all(data)?;
-        w.flush()
+        self.write_input(data)
     }
 
     /// Resize the PTY (and the restore parser) to `rows`×`cols`.
@@ -495,9 +524,51 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         let _ = self.killer.lock().kill();
-        // The reader exits on its own when the master closes; the FIFO reader
+        // The reader exits on its own when the master closes; the writer
+        // thread exits once this drop closes its queue; the FIFO reader
         // unlinks its socket on drop.
         #[cfg(all(unix, feature = "sidecar"))]
         let _ = self.cli_agent_sock.lock().take();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// `sleep` never reads stdin, so any inline write past the kernel's PTY
+    /// input queue would block forever — this hangs without the writer
+    /// thread.
+    #[test]
+    fn write_input_does_not_block_when_child_ignores_stdin() {
+        let session = Session::spawn(
+            &SpawnRequest {
+                id: "writer-test".into(),
+                command: "sleep".into(),
+                args: vec!["30".into()],
+                cwd: std::env::temp_dir(),
+                env: vec![(
+                    "PATH".into(),
+                    std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into()),
+                )],
+                rows: 24,
+                cols: 80,
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+
+        let big = vec![b'x'; 1_000_000];
+        let start = Instant::now();
+        session.write_input(&big).unwrap();
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "write_input blocked for {:?}",
+            start.elapsed()
+        );
+
+        session.kill();
     }
 }

@@ -12,6 +12,15 @@ Format loosely follows Keep a Changelog.
   converts daemon-control errors into `crate::Error`; `ClientError::Io`
   reports its `source()`.
 
+### Fixed
+- Daemon PTY writes no longer block the caller: `Session` drains input and
+  answerbacks through a per-session writer thread (like `LocalPty`), so a
+  child that stops reading stdin can't stall attach threads or wedge the
+  reader on a query reply.
+- Daemon `Server` state moved from `std::sync::Mutex` to
+  `parking_lot::Mutex`: a panicked worker can no longer poison a lock and
+  crash the daemon on the next access.
+
 ## [0.2.0] - 2026-11-11
 ### Added
 - Optional `daemon` and `sidecar` features.

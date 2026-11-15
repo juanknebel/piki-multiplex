@@ -198,6 +198,8 @@ Control connections are one request per connection (`ping`, `list`, `spawn`,
 long-lived duplex stream (`Input`/`Answerback`/`Resize`/`Resync`/`Detach`/
 `Kill` up, `Output`/`Restore`/`ShellState`/`ShellEvent`/`Exited`/
 `Heartbeat` down). Drive it from a dedicated reader thread (see `RemotePty`).
+Writes never block: input and answerbacks queue for a per-session writer
+thread, even when the child stops reading stdin.
 
 Helpers: `new_session_id()` mints a process-unique id; `sessions_enabled(
 config_path)` is a minimal `[sessions].enabled` TOML lookup (default `true`
