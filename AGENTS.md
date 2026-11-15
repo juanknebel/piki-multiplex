@@ -54,8 +54,9 @@ Features: `daemon` (default), `sidecar` (default).
 - `pty/` — `PtySession` wraps `portable-pty` (sync) with `spawn_blocking` for
   non-blocking reads. `vt100::Parser` accumulates terminal state. The reader
   optionally feeds bytes through `shell_integration::parser::OscParser` and
-  updates a per-session `ShellSession`. The vendored vt100 (workspace-root
-  `[patch.crates-io]`, `vendor/vt100`) queues terminal-query answerbacks (DSR,
+  updates a per-session `ShellSession`. The patched vt100 (this repo's
+  `[patch.crates-io]` points it at the `piki-vt100` fork) queues
+  terminal-query answerbacks (DSR,
   DA1) in `Screen::take_answerback()`; the reader drains that after each parse
   pass. Single-answerer policy: the daemon answers queries only while nobody
   is attached; an attached client relays its own parser's reply as
@@ -83,9 +84,9 @@ Features: `daemon` (default), `sidecar` (default).
   payloads.
   `ShellStateSnapshot.sidecar: Option<serde_json::Value>` is forwarded
   opaquely — the daemon never interprets it, only whatever the caller's
-  `SidecarState::snapshot()` produced. `restore.rs` wraps the vendored vt100's
+  `SidecarState::snapshot()` produced. `restore.rs` wraps the forked vt100's
   `Screen::restore_formatted()` (scrollback + screen + alt screen + modes) and
-  owns its round-trip tests — keep them green when touching `vendor/vt100`.
+  owns its round-trip tests — keep them green when the fork changes.
   `daemon/launch.rs::run` takes a `DaemonPaths { sessions_dir, log_dir,
   lock_path, pid_path, socket_path, log_path }` — the embedding app builds
   this from its own paths type (`piki-core`'s `DataPaths::daemon_paths()`) —
@@ -106,7 +107,8 @@ Features: `daemon` (default), `sidecar` (default).
 - `shell_integration/` — init scripts (zsh, bash, fish) embedded via
   `include_str!`, `OscParser` (streaming OSC 133/7 state machine, plus the
   in-band half of the sidecar channel), an `install` module that detects the
-  shell family and prepares env vars + extra args (`ZDOTDIR` / `--rcfile`) so
+  shell family and prepares env vars + extra args (`ZDOTDIR` / `--rcfile` /
+  `-C`) so
   the user's shell sources the bridge before its real dotfiles. Linux/macOS
   only. Also defines:
   - `SidecarState` — a trait a consumer implements to interpret its own
@@ -130,8 +132,8 @@ Features: `daemon` (default), `sidecar` (default).
     prompt" is read as "whatever was reporting through this shell has
     exited," regardless of what the sidecar actually represents.
 - `sidecar/` — `sock.rs`: FIFO transport (per-tab, mode `0600`, `O_RDWR |
-  O_NONBLOCK`) for the out-of-band half of the sidecar channel. Reads
-  newline-delimited JSON and calls `ShellTabState::apply_sidecar_event` —
+  O_NONBLOCK | O_NOFOLLOW`) for the out-of-band half of the sidecar channel.
+  Reads newline-delimited JSON and calls `ShellTabState::apply_sidecar_event` —
   carries no event vocabulary of its own, only moves bytes → JSON →
   `SidecarState::apply`. This exists because a detached hook subprocess (no
   controlling terminal) can't reach an in-band OSC 777 write; the FIFO is the
@@ -164,7 +166,9 @@ Run `scripts/release.sh <new-version>` (e.g. `0.2.0`). It:
 2. Runs fmt/clippy/tests.
 3. Bumps `version` in `Cargo.toml`, refreshes `Cargo.lock`.
 4. Commits `chore: release vX.Y.Z` and creates annotated tag `vX.Y.Z`.
-5. Pushes commit and tag; the `release.yml` workflow then verifies and
-   creates the GitHub Release.
+5. Pushes commit and tag; the `release.yml` workflow then verifies the tag
+   matches `Cargo.toml`, runs fmt/clippy/tests plus the feature-matrix
+   builds on Ubuntu and macOS, and creates the GitHub Release with notes
+   from `CHANGELOG.md`.
 
 Update `CHANGELOG.md` before running the script.

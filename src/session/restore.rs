@@ -3,7 +3,7 @@
 //!
 //! The daemon keeps a `vt100::Parser` per session purely so it can answer
 //! terminal queries while nobody is attached and hand out this buffer on
-//! attach. The heavy lifting lives in the vendored `vt100`
+//! attach. The heavy lifting lives in the forked `vt100`
 //! (`Screen::restore_formatted`): scrollback rows replayed as plain lines,
 //! then the primary screen, then the alternate screen if the application is
 //! in it, then cursor/attributes/input modes. Feeding the result into a new

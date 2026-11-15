@@ -10,7 +10,7 @@
 //! [`ShellTabState::apply_sidecar_event`](crate::shell_integration::ShellTabState::apply_sidecar_event).
 //!
 //! Unix only (gated at the `pub mod sock;` declaration). The crate already
-//! depends on `libc` (see `shell_env.rs`).
+//! depends on `libc`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

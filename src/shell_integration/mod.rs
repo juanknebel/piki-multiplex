@@ -12,8 +12,8 @@
 //!   (cwd, last command exit code, attention timestamp, and an optional
 //!   caller-supplied [`SidecarState`]).
 //!
-//! Only `AIProvider::Shell` tabs use this — provider tabs (Claude/etc.) run
-//! their binary directly without a shell wrapper, so OSC 133 doesn't apply.
+//! Only shell tabs use this: a tab that runs a binary directly without a
+//! shell wrapper never sources the init scripts, so OSC 133 doesn't apply.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};

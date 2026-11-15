@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
+
+## [0.5.0] - 2026-11-15
 ### Added
 - `pty::SpawnOptions` builder with `PtySession::spawn_with` /
   `LocalPty::spawn_with` as the preferred spawn API; the 11-argument `spawn`
@@ -33,7 +35,7 @@ Format loosely follows Keep a Changelog.
   entry (which orphaned the previous session — dropping its last `Arc`
   killed a live detached session's child).
 
-## [0.2.0] - 2026-11-11
+## [0.2.0] - 2026-11-12
 ### Added
 - Optional `daemon` and `sidecar` features.
 - Typed `crate::Error` for public fallible APIs.

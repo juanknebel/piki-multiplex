@@ -12,9 +12,24 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  verify:
-    name: Verify
+  check-tag:
+    name: Tag matches Cargo.toml
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify tag equals crate version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          VER="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          test "$TAG" = "$VER" || { echo "tag ${GITHUB_REF_NAME} != Cargo.toml ${VER}"; exit 1; }
+
+  verify:
+    name: Verify (${{ matrix.os }})
+    needs: check-tag
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -24,6 +39,10 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-features
+      - run: cargo build --release --all-features
+      - run: cargo build --no-default-features
+      - run: cargo build --no-default-features --features daemon
+      - run: cargo build --no-default-features --features sidecar
 
   release:
     name: GitHub Release
@@ -31,6 +50,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          awk -v ver="$VER" '
+            /^## \[/ { if (in_s) exit; if (index($0, "## [" ver "]") == 1) { in_s=1; next } }
+            in_s { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            printf '# %s\n\nSee CHANGELOG.md for details.\n' "$GITHUB_REF_NAME" > release-notes.md
+          fi
       - uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          body_path: release-notes.md

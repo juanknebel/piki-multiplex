@@ -168,7 +168,8 @@ pub struct SessionMeta {
     /// Workspace this tab belongs to (its worktree path).
     #[serde(default)]
     pub workspace_path: PathBuf,
-    /// `AIProvider` label (`Shell`, `Git`) or the custom provider name.
+    /// Free-form provider label (`Shell`, `Git`, …); the daemon never
+    /// interprets it.
     #[serde(default)]
     pub provider: String,
     /// User-set tab title (`Tab::custom_title`).
@@ -338,10 +339,12 @@ pub enum Frame {
     Detach,
     /// Client → daemon: same as `Request::Kill` for this session.
     Kill,
-    /// Daemon → client: full shell/agent state, sent once after attach.
+    /// Daemon → client: full shell/agent state wholesale. Reserved for now —
+    /// the attach snapshot rides in `Reply::Attached`; clients handle both.
     ShellState(ShellStateSnapshot),
-    /// Daemon → client: one shell-integration event. `replayed` marks
-    /// events buffered while nobody was attached.
+    /// Daemon → client: one shell-integration event. `replayed` would mark
+    /// events buffered while nobody was attached — always `false`, since the
+    /// daemon never buffers (the attach snapshot covers the gap).
     ShellEvent {
         event: ShellEvent,
         replayed: bool,
@@ -352,7 +355,8 @@ pub enum Frame {
     },
     /// Daemon → client: liveness probe; a failed write drops the client.
     Heartbeat,
-    /// Daemon → client: the daemon is closing this attachment.
+    /// Daemon → client: the daemon is closing this attachment. Reserved for
+    /// now — conveyed by EOF today; clients handle both.
     Detached {
         reason: String,
     },

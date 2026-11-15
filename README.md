@@ -1,5 +1,7 @@
 # piki-multiplex
 
+[![CI](https://github.com/juanknebel/piki-multiplex/actions/workflows/ci.yml/badge.svg)](https://github.com/juanknebel/piki-multiplex/actions/workflows/ci.yml)
+
 A terminal multiplexer engine: PTY spawning, `vt100` terminal state, OSC
 133/7 shell-integration tracking, and a headless persistent-session daemon
 that survives the frontend that opened it — tabs reattach over a Unix socket
@@ -108,7 +110,7 @@ Key behaviors:
   fills, which would deadlock the reader thread mid-drain.
 - **Batched reads.** The reader accumulates up to 64 KiB before locking the
   `vt100` parser, to avoid lock contention with the render thread.
-- **Single answerer for terminal queries.** The vendored `vt100` queues
+- **Single answerer for terminal queries.** The forked `vt100` queues
   DSR/DA1 replies in `Screen::take_answerback()`. Locally the reader relays
   them to the child; remotely the daemon answers only while nobody is
   attached, otherwise the attached client relays its own parser's reply as
@@ -135,6 +137,7 @@ there:
 use piki_multiplex::session::daemon::{DaemonPaths, run};
 
 // Build from your app's own data-dir layout.
+let data_dir = std::path::PathBuf::from("/var/lib/myapp");
 let paths = DaemonPaths {
     sessions_dir: data_dir.join("sessions"),
     log_dir: data_dir.join("logs"),
@@ -144,8 +147,8 @@ let paths = DaemonPaths {
     log_path: data_dir.join("logs/session-daemon.log"),
 };
 // `sidecar` is supplied once here (it carries a Rust closure and can't cross
-// the wire); `None` leaves the sidecar channel inert daemon-wide.
-run(&paths, /* foreground: */ false, sidecar)?;
+// the wire); pass `Some(config)` to enable it, `None` to leave it inert.
+run(&paths, /* foreground: */ false, None)?;
 # Ok::<(), piki_multiplex::Error>(())
 ```
 
@@ -161,6 +164,7 @@ fall back to a short proxy when the path would overflow `sun_path`.
 use piki_multiplex::session::client::{Daemon, ensure_daemon};
 
 // Start on demand: `launch` re-execs your binary into daemon mode.
+let socket_path = std::path::PathBuf::from("/var/lib/myapp/sessions/daemon.sock");
 let daemon = ensure_daemon(&socket_path, || {
     std::process::Command::new(std::env::current_exe()?)
         .arg("--serve-sessions")
@@ -175,7 +179,7 @@ let sessions = daemon.list()?; // live and exited
 let (sidecar_factory, signal) = (None, None); // or your SidecarFactory + PtyOutputSignal
 let att = daemon.attach("session-id", 24, 80)?;
 let session = piki_multiplex::pty::PtySession::from_attachment(
-    att, /* integration_on: */ true, sidecar_factory, Some(signal),
+    att, /* integration_on: */ true, sidecar_factory, signal,
 );
 // ...or spawn-and-attach in one round-trip.
 let req = piki_multiplex::session::protocol::SpawnRequest {
@@ -202,9 +206,10 @@ Writes never block: input and answerbacks queue for a per-session writer
 thread, even when the child stops reading stdin. The queue is byte-capped —
 a client flooding input is detached rather than growing daemon memory.
 
-Helpers: `new_session_id()` mints a process-unique id; `sessions_enabled(
-config_path)` is a minimal `[sessions].enabled` TOML lookup (default `true`
-on any failure) so frontends agree on whether persistence is on.
+Helpers: `new_session_id()` mints a process-unique id (the daemon rejects a
+`Spawn` whose id already exists); `sessions_enabled(config_path)` is a
+minimal `[sessions].enabled` TOML lookup (default `true` on any failure) so
+frontends agree on whether persistence is on.
 
 ### Wire protocol
 
@@ -220,6 +225,8 @@ restarting frontend still shows its final screen; a daemon with no sessions
 left exits on its own after the idle timeout (detached-but-live sessions pin
 it indefinitely — they are the point of persistence).
 
+Full design (lifecycle, restore, failure modes): [docs/persistent-sessions.md](docs/persistent-sessions.md).
+
 ## `shell_integration`
 
 Init scripts (zsh, bash, fish, embedded via `include_str!`) make the user's
@@ -233,7 +240,7 @@ integration.
 ```rust,no_run
 use piki_multiplex::shell_integration::install::setup_for;
 
-let base = data_dir.join("shell_integration");
+let base = std::path::PathBuf::from("/var/lib/myapp/shell_integration");
 if let Some(setup) = setup_for("/bin/zsh", &base)? {
     let extra_env: Vec<(String, String)> = setup.env.into_iter().collect();
     // ... then SpawnOptions::new(dir, shell)
@@ -331,7 +338,14 @@ cargo fmt --check
 cargo doc --no-deps
 ```
 
+Releases: update `CHANGELOG.md`, then `scripts/release.sh <version>` — see
+[AGENTS.md](AGENTS.md#release-process).
+
 Errors: public fallible APIs return `piki_multiplex::Error` (daemon control
 calls return `session::client::ClientError`, which converts into `Error` via
-`?`); internal code may use `anyhow::Result`. Wire-protocol changes keep new JSON fields
-`#[serde(default)]` and bump `PROTOCOL_VERSION` only when breaking.
+`?`); internal code may use `anyhow::Result`. Wire-protocol changes keep new
+JSON fields `#[serde(default)]` and bump `PROTOCOL_VERSION` only when breaking.
+
+## License
+
+GPL-2.0 — see [LICENSE](LICENSE).

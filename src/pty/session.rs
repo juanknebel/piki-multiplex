@@ -20,7 +20,7 @@ pub struct ShellSession {
 }
 
 impl ShellSession {
-    /// Drain accumulated events for forwarding (e.g. as Tauri events).
+    /// Drain accumulated events for forwarding (e.g. to the embedding frontend).
     pub fn drain_events(&mut self) -> Vec<ShellEvent> {
         std::mem::take(&mut self.pending_events)
     }
@@ -181,7 +181,7 @@ pub struct LocalPty {
     shell: Option<Arc<Mutex<ShellSession>>>,
     /// Out-of-band FIFO reader for the sidecar channel. `Some` only for tabs
     /// spawned with both a `cli_agent_sock` path and a [`SidecarConfig`]
-    /// (e.g. Claude tabs, and shell tabs so a manually-run `claude` can
+    /// (e.g. agent tabs, and shell tabs so a manually-run agent CLI can
     /// report too). Its `Drop` stops the reader and unlinks the FIFO.
     #[cfg(all(unix, feature = "sidecar"))]
     _cli_agent_sock: Option<crate::sidecar::sock::SockReader>,
@@ -357,7 +357,7 @@ impl LocalPty {
 
         // Out-of-band FIFO transport for the structured cli-agent channel.
         // Only meaningful when shell integration is on (so `shell` is `Some`)
-        // and a per-spawn FIFO path was supplied (Claude tabs).
+        // and a per-spawn FIFO path was supplied (agent tabs).
         #[cfg(all(unix, feature = "sidecar"))]
         let cli_agent_sock = match (cli_agent_sock, shell.as_ref()) {
             (Some(path), Some(shell)) => {
@@ -758,9 +758,9 @@ fn remote_reader_loop(
 /// A PTY session, either owned in this process ([`Local`](Self::Local)) or
 /// living in the [session daemon](crate::session::daemon)
 /// ([`Remote`](Self::Remote)). The public surface is identical so callers
-/// (the TUI's `Tab`, the desktop's tab) don't care which backing they got —
-/// the frontend picks `Remote` when the daemon is reachable and falls back to
-/// `Local` otherwise.
+/// (embedding frontends) don't care which backing they got — the frontend
+/// picks `Remote` when the daemon is reachable and falls back to `Local`
+/// otherwise.
 pub enum PtySession {
     Local(LocalPty),
     Remote(RemotePty),
