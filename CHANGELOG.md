@@ -12,6 +12,12 @@ Format loosely follows Keep a Changelog.
   converts daemon-control errors into `crate::Error`; `ClientError::Io`
   reports its `source()`.
 
+### Changed
+- `Frame::Output` carries `bytes::Bytes`: fan-out to N attached clients
+  shares one allocation instead of cloning the chunk per client, and
+  encoding borrows byte payloads instead of copying them (wire format
+  unchanged).
+
 ### Fixed
 - Daemon PTY writes no longer block the caller: `Session` drains input and
   answerbacks through a per-session writer thread (like `LocalPty`), so a

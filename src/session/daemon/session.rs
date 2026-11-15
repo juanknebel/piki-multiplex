@@ -312,7 +312,7 @@ impl Session {
             let mut out = self.output.lock();
             out.parser.process(chunk);
             let answerback = out.parser.screen_mut().take_answerback();
-            out.broadcast(&Frame::Output(chunk.to_vec()));
+            out.broadcast(&Frame::Output(bytes::Bytes::copy_from_slice(chunk)));
             for ev in events {
                 out.broadcast(&Frame::ShellEvent {
                     event: ev,

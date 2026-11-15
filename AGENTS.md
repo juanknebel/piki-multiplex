@@ -78,6 +78,9 @@ Features: `daemon` (default), `sidecar` (default).
   `#[serde(default)]` so additive changes stay compatible — bump
   `PROTOCOL_VERSION` for anything else (v2 added `Frame::Answerback`: the
   client→daemon query-relay, gated on the most recently attached client).
+  In memory, `Frame::Output` holds `bytes::Bytes` (wire form unchanged) so
+  broadcast shares one allocation across clients; `encode` borrows byte
+  payloads.
   `ShellStateSnapshot.sidecar: Option<serde_json::Value>` is forwarded
   opaquely — the daemon never interprets it, only whatever the caller's
   `SidecarState::snapshot()` produced. `restore.rs` wraps the vendored vt100's

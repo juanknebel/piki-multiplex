@@ -22,9 +22,11 @@
 //!    attach stream carrying the remaining frame kinds in both directions
 //!    until either side detaches.
 
+use std::borrow::Cow;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use crate::shell_integration::ShellEvent;
@@ -319,8 +321,9 @@ pub enum Frame {
     /// so the daemon can tell a relay (gated) from keystrokes (always
     /// forwarded).
     Answerback(Vec<u8>),
-    /// Daemon → client: live PTY output.
-    Output(Vec<u8>),
+    /// Daemon → client: live PTY output. Reference-counted so fan-out to N
+    /// attached clients shares one allocation instead of cloning per client.
+    Output(Bytes),
     /// Daemon → client: restore buffer (screen + scrollback + modes). Sent
     /// right after `Attached`/`Spawned` and in reply to `Resync`.
     Restore(Vec<u8>),
@@ -410,41 +413,42 @@ fn parse<T: for<'de> Deserialize<'de>>(payload: &[u8]) -> io::Result<T> {
 }
 
 impl Frame {
-    /// Frame kind tag and payload bytes.
-    fn encode(&self) -> io::Result<(u8, Vec<u8>)> {
+    /// Frame kind tag and payload bytes. Byte payloads are borrowed so
+    /// encoding never copies them; only the JSON arms allocate.
+    fn encode(&self) -> io::Result<(u8, Cow<'_, [u8]>)> {
         Ok(match self {
-            Frame::Hello(h) => (kind::HELLO, json(h)?),
-            Frame::Request(r) => (kind::REQUEST, json(r)?),
-            Frame::Reply(r) => (kind::REPLY, json(r)?),
-            Frame::Input(b) => (kind::INPUT, b.clone()),
-            Frame::Answerback(b) => (kind::ANSWERBACK, b.clone()),
-            Frame::Output(b) => (kind::OUTPUT, b.clone()),
-            Frame::Restore(b) => (kind::RESTORE, b.clone()),
+            Frame::Hello(h) => (kind::HELLO, Cow::Owned(json(h)?)),
+            Frame::Request(r) => (kind::REQUEST, Cow::Owned(json(r)?)),
+            Frame::Reply(r) => (kind::REPLY, Cow::Owned(json(r)?)),
+            Frame::Input(b) => (kind::INPUT, Cow::Borrowed(b)),
+            Frame::Answerback(b) => (kind::ANSWERBACK, Cow::Borrowed(b)),
+            Frame::Output(b) => (kind::OUTPUT, Cow::Borrowed(b)),
+            Frame::Restore(b) => (kind::RESTORE, Cow::Borrowed(b)),
             Frame::Resize { rows, cols } => (
                 kind::RESIZE,
-                json(&ResizeMsg {
+                Cow::Owned(json(&ResizeMsg {
                     rows: *rows,
                     cols: *cols,
-                })?,
+                })?),
             ),
-            Frame::Resync => (kind::RESYNC, Vec::new()),
-            Frame::Detach => (kind::DETACH, Vec::new()),
-            Frame::Kill => (kind::KILL, Vec::new()),
-            Frame::ShellState(s) => (kind::SHELL_STATE, json(s)?),
+            Frame::Resync => (kind::RESYNC, Cow::Borrowed(&[])),
+            Frame::Detach => (kind::DETACH, Cow::Borrowed(&[])),
+            Frame::Kill => (kind::KILL, Cow::Borrowed(&[])),
+            Frame::ShellState(s) => (kind::SHELL_STATE, Cow::Owned(json(s)?)),
             Frame::ShellEvent { event, replayed } => (
                 kind::SHELL_EVENT,
-                json(&ShellEventMsg {
+                Cow::Owned(json(&ShellEventMsg {
                     event: event.clone(),
                     replayed: *replayed,
-                })?,
+                })?),
             ),
-            Frame::Exited { code } => (kind::EXITED, json(&ExitedMsg { code: *code })?),
-            Frame::Heartbeat => (kind::HEARTBEAT, Vec::new()),
+            Frame::Exited { code } => (kind::EXITED, Cow::Owned(json(&ExitedMsg { code: *code })?)),
+            Frame::Heartbeat => (kind::HEARTBEAT, Cow::Borrowed(&[])),
             Frame::Detached { reason } => (
                 kind::DETACHED,
-                json(&DetachedMsg {
+                Cow::Owned(json(&DetachedMsg {
                     reason: reason.clone(),
-                })?,
+                })?),
             ),
         })
     }
@@ -456,7 +460,7 @@ impl Frame {
             kind::REPLY => Frame::Reply(parse(&payload)?),
             kind::INPUT => Frame::Input(payload),
             kind::ANSWERBACK => Frame::Answerback(payload),
-            kind::OUTPUT => Frame::Output(payload),
+            kind::OUTPUT => Frame::Output(Bytes::from(payload)),
             kind::RESTORE => Frame::Restore(payload),
             kind::RESIZE => {
                 let m: ResizeMsg = parse(&payload)?;
@@ -664,7 +668,7 @@ mod tests {
         }));
         round_trip(Frame::Input(b"ls\r".to_vec()));
         round_trip(Frame::Answerback(b"\x1b[?6c".to_vec()));
-        round_trip(Frame::Output(b"\x1b[31mhi\x1b[m".to_vec()));
+        round_trip(Frame::Output(Bytes::from_static(b"\x1b[31mhi\x1b[m")));
         round_trip(Frame::Restore(vec![0, 255, 1, 2]));
         round_trip(Frame::Resize {
             rows: 50,
@@ -706,13 +710,13 @@ mod tests {
     fn several_frames_back_to_back() {
         let mut buf = Vec::new();
         write_frame(&mut buf, &Frame::Heartbeat).unwrap();
-        write_frame(&mut buf, &Frame::Output(b"abc".to_vec())).unwrap();
+        write_frame(&mut buf, &Frame::Output(Bytes::from_static(b"abc"))).unwrap();
         write_frame(&mut buf, &Frame::Exited { code: Some(0) }).unwrap();
         let mut cur = Cursor::new(buf);
         assert_eq!(read_frame(&mut cur).unwrap(), Frame::Heartbeat);
         assert_eq!(
             read_frame(&mut cur).unwrap(),
-            Frame::Output(b"abc".to_vec())
+            Frame::Output(Bytes::from_static(b"abc"))
         );
         assert_eq!(
             read_frame(&mut cur).unwrap(),
@@ -725,7 +729,7 @@ mod tests {
 
     #[test]
     fn torn_frame_is_unexpected_eof() {
-        let bytes = encode_frame(&Frame::Output(b"hello".to_vec())).unwrap();
+        let bytes = encode_frame(&Frame::Output(Bytes::from_static(b"hello"))).unwrap();
         let err = read_frame(&mut Cursor::new(&bytes[..bytes.len() - 2])).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
     }
