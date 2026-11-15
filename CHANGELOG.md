@@ -5,6 +5,11 @@ Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-15
+### Changed
+- Updated `parking_lot` to 0.13 (`parking_lot_core` 0.10, `lock_api` 0.5):
+  better `Mutex` performance under contention; no API changes needed.
+
 ## [0.5.0] - 2026-11-15
 ### Added
 - `pty::SpawnOptions` builder with `PtySession::spawn_with` /
