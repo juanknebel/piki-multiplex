@@ -711,4 +711,178 @@ mod tests {
         assert!(finalise_command(b"   \t  ").is_none());
         assert!(finalise_command(b"\x1b[31m\x1b[0m").is_none());
     }
+
+    /// Feed `bytes` in one go and at every 2-chunk split point; all must
+    /// agree. Covers ST straddling a chunk boundary, split UTF-8, and a
+    /// lone ESC held across the feed boundary.
+    fn assert_split_invariant(make_parser: impl Fn() -> OscParser, bytes: &[u8]) {
+        let expected = make_parser().feed(bytes);
+        for at in 0..=bytes.len() {
+            let mut p = make_parser();
+            let mut got = p.feed(&bytes[..at]);
+            got.extend(p.feed(&bytes[at..]));
+            assert_eq!(got, expected, "split at byte {at} of {bytes:?}");
+        }
+    }
+
+    #[test]
+    fn every_split_point_agrees_with_single_feed() {
+        let sidecar = format!("\x1b]777;notify;{TEST_TARGET};{{\"a\":1}}\x07");
+        let corpus: Vec<Vec<u8>> = vec![
+            b"\x1b]133;D;42\x07".to_vec(),
+            b"\x1b]133;B\x07git st\x1b]133;C\x07\x1b]133;D;0\x07".to_vec(),
+            b"\x1b]7;file://h/a%20b\x07".to_vec(),
+            b"\x1b]0;title here\x1b\\".to_vec(),
+            b"\x1b]133;A\x1b\\".to_vec(),
+            sidecar.into_bytes(),
+            b"\x1b]133;A\x07\x1b]133;B\x07".to_vec(),
+        ];
+        for seq in &corpus {
+            assert_split_invariant(OscParser::new, seq);
+            assert_split_invariant(
+                || OscParser::with_sidecar_target(Some(TEST_TARGET.to_string())),
+                seq,
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_utf8_payload_yields_no_event() {
+        assert!(parse_one(b"\x1b]133;D;\xff\xfe\x07").is_empty());
+        assert!(parse_one(b"\x1b]0;\xff\xfe\x07").is_empty());
+        let mut seq = b"\x1b]777;notify;".to_vec();
+        seq.extend(TEST_TARGET.as_bytes());
+        seq.extend(b";{\xff}\x07");
+        assert!(parse_one_with_target(&seq).is_empty());
+    }
+
+    #[test]
+    fn osc_777_truncated_framing_yields_no_event() {
+        for seq in [
+            "\x1b]777;notify\x07".to_string(),
+            "\x1b]777;notify;\x07".to_string(),
+            format!("\x1b]777;notify;{TEST_TARGET}\x07"),
+            format!("\x1b]777;notify;{TEST_TARGET};\x07"),
+            format!("\x1b]777;other;{TEST_TARGET};{{\"a\":1}}\x07"),
+        ] {
+            assert!(parse_one_with_target(seq.as_bytes()).is_empty(), "{seq:?}");
+        }
+        // Valid JSON scalars still decode (the sidecar state decides meaning).
+        let seq = format!("\x1b]777;notify;{TEST_TARGET};null\x07");
+        assert_eq!(
+            parse_one_with_target(seq.as_bytes()),
+            vec![ShellEvent::Sidecar(serde_json::Value::Null)]
+        );
+    }
+
+    #[test]
+    fn osc_7_rejects_malformed_urls() {
+        for seq in [
+            b"\x1b]7;not-a-url\x07".as_slice(),
+            b"\x1b]7;file://host-without-path\x07".as_slice(),
+            b"\x1b]7;\x07".as_slice(),
+            b"\x1b]7;FILE:///tmp\x07".as_slice(),
+        ] {
+            assert!(parse_one(seq).is_empty(), "{seq:?}");
+        }
+    }
+
+    #[test]
+    fn percent_decode_handles_edge_cases() {
+        assert_eq!(percent_decode(b"/a%20b"), b"/a b".to_vec());
+        assert_eq!(percent_decode(b"/A%2fB"), b"/A/B".to_vec());
+        assert_eq!(percent_decode(b"/A%2FB"), b"/A/B".to_vec());
+        assert_eq!(percent_decode(b"/100%"), b"/100%".to_vec());
+        assert_eq!(percent_decode(b"/%4"), b"/%4".to_vec());
+        assert_eq!(percent_decode(b"/%zz"), b"/%zz".to_vec());
+        assert_eq!(percent_decode(b"/%%41"), b"/%A".to_vec());
+    }
+
+    #[test]
+    fn osc_133_d_tolerates_weird_exit_args() {
+        // Empty / non-numeric → unknown exit code, still an end event.
+        for (input, expected) in [
+            (b"\x1b]133;D;\x07".as_slice(), None),
+            (b"\x1b]133;D;abc\x07".as_slice(), None),
+            (b"\x1b]133;D;0;aid=1\x07".as_slice(), Some(0)),
+            (b"\x1b]133;D;137 extra\x07".as_slice(), Some(137)),
+        ] {
+            assert_eq!(
+                parse_one(input),
+                vec![ShellEvent::CommandEnd {
+                    exit_code: expected,
+                    command: None,
+                }],
+                "{input:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn command_capture_is_bounded_and_survives_overflow() {
+        let mut p = OscParser::new();
+        let mut input = b"\x1b]133;B\x07".to_vec();
+        input.extend(std::iter::repeat_n(b'z', 8 * 1024)); // past MAX_CMD_BUF
+        input.extend(b"\x1b]133;C\x07\x1b]133;D;0\x07");
+        let events = p.feed(&input);
+        let cmd = events
+            .iter()
+            .find_map(|e| match e {
+                ShellEvent::CommandEnd { command, .. } => Some(command.clone()),
+                _ => None,
+            })
+            .flatten()
+            .expect("command captured");
+        // Captured prefix survives (truncated to notification length).
+        assert!(cmd.chars().count() <= 80);
+        assert!(cmd.ends_with('…'));
+        assert!(cmd.starts_with('z'));
+    }
+
+    #[test]
+    fn stray_control_bytes_around_sequences_are_harmless() {
+        // NULs, a lone BEL, and a double-ESC before a clean OSC.
+        let events = parse_one(b"\x00\x1b\x1b]133;A\x07\x00\x07");
+        assert_eq!(events, vec![ShellEvent::PromptStart]);
+        // BEL inside the captured command is dropped, not a terminator.
+        let mut p = OscParser::new();
+        let events = p.feed(b"\x1b]133;B\x07ab\x07cd\x1b]133;C\x07\x1b]133;D;0\x07");
+        let cmd = events.iter().find_map(|e| match e {
+            ShellEvent::CommandEnd { command, .. } => command.clone(),
+            _ => None,
+        });
+        assert_eq!(cmd, Some("abcd".to_string()));
+    }
+
+    #[test]
+    fn second_input_start_discards_stale_capture() {
+        let mut p = OscParser::new();
+        let events =
+            p.feed(b"\x1b]133;B\x07stale\x1b]133;B\x07fresh\x1b]133;C\x07\x1b]133;D;0\x07");
+        let cmd = events.iter().find_map(|e| match e {
+            ShellEvent::CommandEnd { command, .. } => command.clone(),
+            _ => None,
+        });
+        assert_eq!(cmd, Some("fresh".to_string()));
+    }
+
+    #[test]
+    fn empty_osc_and_esc_at_feed_end_are_safe() {
+        assert!(parse_one(b"\x1b]\x07").is_empty());
+        // Lone ESC / ESC ] held across the feed boundary, completed later.
+        let mut p = OscParser::new();
+        assert!(p.feed(b"\x1b").is_empty());
+        assert!(p.feed(b"]133;A").is_empty());
+        assert_eq!(p.feed(b"\x07"), vec![ShellEvent::PromptStart]);
+    }
+
+    #[test]
+    fn esc_inside_osc_payload_survives_verbatim() {
+        // ESC + non-backslash inside a payload is data, not ST.
+        let events = parse_one(b"\x1b]0;ab\x1bXcd\x07");
+        assert_eq!(
+            events,
+            vec![ShellEvent::WindowTitle("ab\x1bXcd".to_string())]
+        );
+    }
 }
