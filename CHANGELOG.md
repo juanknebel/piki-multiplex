@@ -23,6 +23,9 @@ Format loosely follows Keep a Changelog.
 - Daemon `Session` writer queue is byte-capped (`WRITER_QUEUE_BYTES`): input
   floods are rejected and the sending client detached instead of growing
   daemon memory without bound.
+- Daemon `Spawn` rejects duplicate session ids instead of replacing the map
+  entry (which orphaned the previous session — dropping its last `Arc`
+  killed a live detached session's child).
 
 ## [0.2.0] - 2026-11-11
 ### Added

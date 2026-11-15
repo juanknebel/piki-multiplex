@@ -679,4 +679,33 @@ mod tests {
             other => panic!("expected Incompatible, got {other:?}"),
         }
     }
+
+    #[test]
+    fn spawn_rejects_duplicate_id_without_harming_original() {
+        let (daemon, _g) = in_process_daemon();
+        let info = daemon.spawn(cat_req("dup")).unwrap();
+        assert!(info.state.is_live());
+
+        match daemon.spawn(cat_req("dup")) {
+            Err(ClientError::Daemon(m)) => {
+                assert!(m.contains("already exists"), "unexpected error: {m}")
+            }
+            other => panic!("expected duplicate-id error, got {other:?}"),
+        }
+
+        // Original untouched: listed exactly once, still live.
+        let listed = daemon.list().unwrap();
+        assert_eq!(listed.iter().filter(|s| s.id == "dup").count(), 1);
+        assert!(
+            listed
+                .iter()
+                .find(|s| s.id == "dup")
+                .unwrap()
+                .state
+                .is_live()
+        );
+
+        daemon.kill("dup").unwrap();
+        daemon.remove("dup").unwrap();
+    }
 }

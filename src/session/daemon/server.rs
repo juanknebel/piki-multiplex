@@ -173,12 +173,25 @@ impl Server {
             Request::Spawn(sr) => {
                 let attach = sr.attach;
                 let (rows, cols) = (sr.rows, sr.cols);
+                // Reject duplicate ids before spawning: silently replacing
+                // the map entry would orphan the previous session — dropping
+                // its last Arc kills a live detached session's child. The
+                // lock is held across the spawn so two concurrent spawns
+                // can't both pass the check (spawns are rare and fast).
+                let mut sessions = self.sessions.lock();
+                if sessions.contains_key(&sr.id) {
+                    return reply(
+                        &mut stream,
+                        Reply::Error {
+                            message: format!("session '{}' already exists", sr.id),
+                        },
+                    );
+                }
                 match Session::spawn(&sr, self.sidecar.clone()) {
                     Ok(session) => {
                         let info = session.info();
-                        self.sessions
-                            .lock()
-                            .insert(session.id.clone(), Arc::clone(&session));
+                        sessions.insert(session.id.clone(), Arc::clone(&session));
+                        drop(sessions);
                         self.mark_active();
                         if attach {
                             // Register before the reply so the connection is
