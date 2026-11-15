@@ -8,6 +8,9 @@ Format loosely follows Keep a Changelog.
 - `pty::SpawnOptions` builder with `PtySession::spawn_with` /
   `LocalPty::spawn_with` as the preferred spawn API; the 11-argument `spawn`
   is kept and delegates to it.
+- `Error::Client` (`From<session::client::ClientError>`, transparent): `?`
+  converts daemon-control errors into `crate::Error`; `ClientError::Io`
+  reports its `source()`.
 
 ## [0.2.0] - 2026-11-11
 ### Added

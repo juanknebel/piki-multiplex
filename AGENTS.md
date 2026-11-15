@@ -137,7 +137,9 @@ crate must not depend on.
 
 ## Conventions
 
-- Error handling: public fallible APIs return `crate::Error`; internal code may use `anyhow::Result`.
+- Error handling: public fallible APIs return `crate::Error`;
+  `session::client::ClientError` (daemon-control calls) converts into it via
+  `?` (`Error::Client`, transparent). Internal code may use `anyhow::Result`.
 - Thread safety: `parking_lot::Mutex` for shared state, no `unwrap()` on
   locks held across an `await`.
 - Wire-protocol changes: keep new JSON fields `#[serde(default)]`; bump

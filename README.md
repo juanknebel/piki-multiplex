@@ -329,6 +329,6 @@ cargo doc --no-deps
 ```
 
 Errors: public fallible APIs return `piki_multiplex::Error` (daemon control
-calls return `session::client::ClientError`); internal code may use
-`anyhow::Result`. Wire-protocol changes keep new JSON fields
+calls return `session::client::ClientError`, which converts into `Error` via
+`?`); internal code may use `anyhow::Result`. Wire-protocol changes keep new JSON fields
 `#[serde(default)]` and bump `PROTOCOL_VERSION` only when breaking.

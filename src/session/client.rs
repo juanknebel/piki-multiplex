@@ -50,7 +50,14 @@ impl std::fmt::Display for ClientError {
     }
 }
 
-impl std::error::Error for ClientError {}
+impl std::error::Error for ClientError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ClientError::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
 
 impl From<io::Error> for ClientError {
     fn from(e: io::Error) -> Self {
